@@ -1,0 +1,52 @@
+{
+  "name": "propertysanta-cleaner-backend",
+  "version": "1.0.0",
+  "description": "Backend API for PropertySanta Cleaner Management System",
+  "type": "commonjs",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "nodemon --exec \"node --experimental-print-required-tla\" server.js",
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "seed:skus": "node scripts/seed-skus.js",
+    "fix:index:wo": "node ./src/scripts/fix_wo_index.js",
+    "seed:contractBiz:phones": "node scripts/backfillContractBusinessPhones.js",
+    "backfill:jobids": "node scripts/backfill-jobids.js --startAt=100 --batchSize=1000",
+  "seed:admin": "node -r dotenv/config scripts/seed-admin.js"
+  },
+  "keywords": [
+    "cleaning",
+    "property",
+    "management",
+    "api"
+  ],
+  "author": "PropertySanta",
+  "license": "MIT",
+  "dependencies": {
+    "@google/generative-ai": "^0.24.1",
+    "@paypal/checkout-server-sdk": "^1.0.3",
+    "bcryptjs": "^2.4.3",
+    "cloudinary": "^2.7.0",
+    "cookie-parser": "^1.4.7",
+    "cors": "^2.8.5",
+    "crypto": "^1.0.1",
+    "dayjs": "^1.11.18",
+    "dotenv": "^16.6.1",
+    "express": "^4.21.2",
+    "express-validator": "^7.2.1",
+    "firebase-admin": "^13.5.0",
+    "jsonwebtoken": "^9.0.2",
+    "mongoose": "^8.18.1",
+    "multer": "^1.4.5-lts.1",
+    "nanoid": "^5.1.6",
+    "socket.io": "^4.8.1",
+    "twilio": "^5.10.2",
+    "uuid": "^13.0.0"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.10"
+  },
+  "engines": {
+    "node": ">=20.19 <23"
+  }
+}
