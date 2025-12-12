@@ -5,10 +5,148 @@ const Invoice = require('../models/Invoice');
 const Payment = require('../models/Payment');
 const fetch = require('node-fetch');
 const { cloudinary } = require('../services/cloudinary');
+const mongoose = require('mongoose');
+
+
+// this is for manual invoices -->
+
+
+// this is for manual invoices -->
+
+// PUBLIC: email / pay link ke liye lightweight invoice view (no auth)
+router.get('/public/:invoiceId', async (req, res, next) => {
+  try {
+    const { invoiceId } = req.params;
+
+    let invoice = null;
+
+    // 1) Agar ye 24-char valid ObjectId hai to _id se find karo
+    if (mongoose.Types.ObjectId.isValid(invoiceId)) {
+      invoice = await Invoice.findById(invoiceId).lean();
+    } else {
+      // 2) Nahi to Firestore style id assume karo (e.g. ZuCW8SkPtHThzuRSXWnv)
+      //    aur fsId field par search karo (neeche model me add karenge)
+      invoice = await Invoice.findOne({ fsId: invoiceId }).lean();
+    }
+
+    if (!invoice) {
+      return res
+        .status(404)
+        .json({ ok: false, error: 'Invoice not found for this id' });
+    }
+
+    const total = Number(invoice.total || 0);
+    const alreadyPaid = Number(invoice.amountPaid || 0);
+    let balanceDue =
+      typeof invoice.balanceDue === 'number'
+        ? Number(invoice.balanceDue)
+        : total - alreadyPaid;
+
+    if (Number.isNaN(balanceDue)) balanceDue = 0;
+    if (balanceDue < 0) balanceDue = 0;
+
+    return res.json({
+      ok: true,
+      data: {
+        _id: invoice._id,
+        number: invoice.number,
+        issueDate: invoice.issueDate,
+        dueDate: invoice.dueDate,
+        status: invoice.status,
+        subtotal: invoice.subtotal,
+        taxTotal: invoice.tax,
+        discountTotal: invoice.discountTotal,
+        total,
+        amountPaid: alreadyPaid,
+        balanceDue,
+        customerName: invoice.customerName || invoice.customer?.name,
+        customerEmail: invoice.customerEmail || invoice.customer?.email,
+        customerAddress: invoice.customerAddress || '',
+        // monthly invoices ke liye lines bhi support kar lo
+        lineItems: invoice.lineItems || invoice.lines || [],
+      },
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// PUBLIC: ops-app Firestore invoice ko Mongo me sync/upsert karne ke liye
+// body me fsId etc aayega
+router.post('/sync-from-fs', async (req, res, next) => {
+  try {
+    const {
+      fsId,
+      number,
+      issueDate,
+      dueDate,
+      status = 'issued',
+      subtotal = 0,
+      taxTotal = 0,
+      discountTotal = 0,
+      total = 0,
+      amountPaid = 0,
+      balanceDue,
+      customerName,
+      customerEmail,
+      customerAddress,
+      lineItems = [],
+    } = req.body || {};
+
+    if (!fsId) {
+      return res.status(400).json({ ok: false, error: 'fsId required' });
+    }
+
+    const safeSubtotal = Number(subtotal) || 0;
+    const safeTax = Number(taxTotal) || 0;
+    const safeDiscount = Number(discountTotal) || 0;
+    const safeTotal =
+      Number(total) || Number((safeSubtotal + safeTax - safeDiscount).toFixed(2));
+    const safePaid = Number(amountPaid) || 0;
+
+    let safeBalance =
+      typeof balanceDue === 'number'
+        ? Number(balanceDue)
+        : Number((safeTotal - safePaid).toFixed(2));
+
+    if (!Number.isFinite(safeBalance)) safeBalance = 0;
+
+    const update = {
+      fsId,
+      number: number || fsId,
+      issueDate: issueDate || null,
+      dueDate: dueDate || null,
+      status,
+      subtotal: safeSubtotal,
+      tax: safeTax,
+      discountTotal: safeDiscount,
+      total: safeTotal,
+      amountPaid: safePaid,
+      balanceDue: safeBalance,
+      customerName: customerName || null,
+      customerEmail: customerEmail || null,
+      customerAddress: customerAddress || null,
+      lineItems,
+    };
+
+    const doc = await Invoice.findOneAndUpdate(
+      { fsId },
+      { $set: update },
+      { new: true, upsert: true }
+    ).lean();
+
+    return res.json({ ok: true, data: doc });
+  } catch (err) {
+    next(err);
+  }
+});
+
+
+
+// manual invoice end
 
 // ✅ import the middleware you actually export
 const { auth: requireAuth } = require('../../middleware/auth');
-
 // ✅ mount ONCE for the whole router (not inside handlers)
 router.use(requireAuth);
 
@@ -217,6 +355,53 @@ router.patch('/:id', async (req, res, next) => {
     res.json({ ok: true, data: doc });
   } catch (e) { next(e); }
 });
+
+// DELETE /api/invoices/:id  – hard delete from Mongo
+router.delete('/:id', async (req, res, next) => {
+  try {
+    const { id } = req.params || {};
+    if (!id) {
+      return res
+        .status(400)
+        .json({ ok: false, error: 'Invoice id required' });
+    }
+
+    // (optional) role check – sirf admin/ops ko allow karna ho to uncomment:
+    // const role = (req.userDoc?.role || req.user?.role || '').toLowerCase();
+    // if (role !== 'admin' && role !== 'ops') {
+    //   return res.status(403).json({ ok: false, error: 'forbidden' });
+    // }
+
+    const inv = await Invoice.findById(id);
+    if (!inv) {
+      return res
+        .status(404)
+        .json({ ok: false, error: 'Invoice not found' });
+    }
+
+    // ❌ Mongo se hatao
+    await inv.deleteOne();
+
+    // (optional) agar tum Firestore me bhi mirror rakhte ho to yahan clean-up kar sakte ho
+    // try {
+    //   await firestore.collection('invoices').doc(String(id)).delete();
+    // } catch (e) {
+    //   console.error('Firestore invoice delete failed:', e);
+    // }
+
+    return res.json({
+      ok: true,
+      data: { id },
+    });
+  } catch (err) {
+    console.error('DELETE /invoices/:id error', err);
+    return res.status(500).json({
+      ok: false,
+      error: err.message || 'Server error',
+    });
+  }
+});
+
 
 
 // GET /api/invoices/:id/pdf?download=0|1

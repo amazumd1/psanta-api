@@ -16,6 +16,9 @@ const WarehouseOrder = require('../../models/WarehouseOrder'); // ✅ add
 const Order = require('../../../models/Order');
 const { auth } = require('../../../middleware/auth'); // top of file
 const Counter = require('../../models/Counter');
+const mongoose = require('mongoose');
+
+
 const PORTAL_JWT_TTL = process.env.CP_JWT_TTL || '7d';              // e.g. '7d'
 const PORTAL_JWT_TTL_MS =
   Number(process.env.CP_JWT_TTL_MS || 7 * 24 * 60 * 60 * 1000);      // 7d in ms
@@ -76,9 +79,14 @@ async function ensureCustomerProperty(userId, bizId, prop = {}) {
     if (!p.city && prop.city) upd.city = prop.city;
     if (!p.state && prop.state) upd.state = prop.state;
     if (!p.zip && prop.zip) upd.zip = prop.zip;
-    if ((!p.squareFootage || p.squareFootage === 1200) && Number(prop.squareFootage) > 0) {
-      upd.squareFootage = Number(prop.squareFootage);
+    // if ((!p.squareFootage || p.squareFootage === 1200) && Number(prop.squareFootage) > 0) {
+    //   upd.squareFootage = Number(prop.squareFootage);
+    // }
+    const _sf = (prop && (prop.squareFootage ?? prop.sqft));
+    if ((!p.squareFootage || p.squareFootage === 1200) && Number(_sf) > 0) {
+      upd.squareFootage = Number(_sf);
     }
+
     const cyc = prop.cycle || prop.cleaningCycle;
     if (!p.cycle && cyc) upd.cycle = cyc;
     if (p.isActive === false) upd.isActive = true;
@@ -98,7 +106,8 @@ async function ensureCustomerProperty(userId, bizId, prop = {}) {
     state: prop.state || '',
     zip: prop.zip || '',
     type: prop.type || 'house',
-    squareFootage: Number(prop.squareFootage || 1200),
+    // squareFootage: Number(prop.squareFootage || 1200),
+    squareFootage: Number((prop && (prop.squareFootage ?? prop.sqft)) || 1200),
     cycle: prop.cycle || prop.cleaningCycle || 'monthly',
     customer: userId,
     isActive: true,
@@ -123,7 +132,13 @@ async function ensureCustomerProperty(userId, bizId, prop = {}) {
 /* ---------- Create One-Time Order ---------- */
 router.post('/create-order', async (req, res, next) => {
   try {
-    const { propertyId, userId, amountOverride } = req.body || {};
+    const {
+      propertyId,
+      userId,
+      amountOverride,
+      profitChannel,      // 🔹 yahi se channel aa raha hai PaymentDrawer se
+      cart,               // optional, thoda clean code
+    } = req.body || {};
     const { amount, reason } = await computeEstimatedMonthlyOnServer({ propertyId, amountOverride });
 
     if (!propertyId) return res.status(400).json({ ok: false, error: 'propertyId required' });
@@ -165,6 +180,7 @@ router.post('/create-order', async (req, res, next) => {
       paypal: { orderId: createRes.result.id, rawCreateResponse: createRes.result },
       cart: req.body?.cart || null,
       status: 'created',
+      profitChannel: profitChannel || 'customer',
     });
 
     const approveUrl = (createRes.result.links || []).find(l => l.rel === 'approve')?.href;
@@ -327,8 +343,13 @@ router.post('/capture-order', async (req, res) => {
           if (cart.property.state) u.state = cart.property.state;
           if (cart.property.zip) u.zip = cart.property.zip;
           if (cart.property.type) u.type = cart.property.type;
-          if (Number(cart.property.squareFootage) > 0)
-            u.squareFootage = Number(cart.property.squareFootage);
+          // if (Number(cart.property.squareFootage) > 0)
+          //   u.squareFootage = Number(cart.property.squareFootage);
+          const _capSF = (cart?.property?.squareFootage ?? cart?.property?.sqft);
+          if (Number(_capSF) > 0) {
+            u.squareFootage = Number(_capSF);
+          }
+
           const cyc = cart.property.cycle || cart.property.cleaningCycle;
           if (cyc) u.cycle = cyc;
           if (Object.keys(u).length) {
@@ -454,15 +475,53 @@ router.post('/capture-order', async (req, res) => {
     }
 
     // Create one paid invoice per Payment (idempotent)
+    // try {
+    //   const lineAmt = Number(saved?.amount || 0);
+    //   const exists = await Invoice.findOne({ payments: saved._id }).lean();
+    //   if (!exists) {
+    //     await (new Invoice({
+    //       customerId: saved.userId || undefined,
+    //       propertyId: saved.propertyId || undefined,
+    //       lines: [
+    //         { sku: 'SERVICE-CLEANING', description: 'Cleaning Service', qty: 1, unitPrice: lineAmt, amount: lineAmt }
+    //       ],
+    //       subtotal: lineAmt,
+    //       tax: 0,
+    //       total: lineAmt,
+    //       status: 'paid',
+    //       payments: [saved._id],
+    //     })).save();
+    //   }
+    // } catch (e) {
+    //   console.warn('invoice create failed:', e.message);
+    // }
+
+        // Create one paid invoice per Payment (idempotent)
     try {
       const lineAmt = Number(saved?.amount || 0);
       const exists = await Invoice.findOne({ payments: saved._id }).lean();
       if (!exists) {
+        // 🔹 Year capture karo (PlanningProfit ke liye)
+        const created = saved?.createdAt ? new Date(saved.createdAt) : new Date();
+        const year = created.getFullYear();
+
         await (new Invoice({
           customerId: saved.userId || undefined,
           propertyId: saved.propertyId || undefined,
+
+          // 🔥 NEW: year + profitChannel PlanningProfit ke liye
+          year,
+          profitChannel: saved.profitChannel || 'customer',
+          
+
           lines: [
-            { sku: 'SERVICE-CLEANING', description: 'Cleaning Service', qty: 1, unitPrice: lineAmt, amount: lineAmt }
+            {
+              sku: 'SERVICE-CLEANING',
+              description: 'Cleaning Service',
+              qty: 1,
+              unitPrice: lineAmt,
+              amount: lineAmt,
+            }
           ],
           subtotal: lineAmt,
           tax: 0,
@@ -474,6 +533,7 @@ router.post('/capture-order', async (req, res) => {
     } catch (e) {
       console.warn('invoice create failed:', e.message);
     }
+
 
     // Short-lived portal JWT
     let jwtToken = null;
@@ -848,6 +908,56 @@ router.get('/list', auth, async (req, res, next) => {
   } catch (e) { next(e); }
 });
 
+// 🗑 Hard delete payment (used by Payments.jsx delete icon)
+// Body: { paymentId?: string, captureId?: string }
+router.post('/hard-delete', auth, async (req, res, next) => {
+  try {
+    const { paymentId, captureId } = req.body || {};
+
+    if (!paymentId && !captureId) {
+      return res.status(400).json({
+        ok: false,
+        error: 'paymentId or captureId required',
+      });
+    }
+
+    // --- Query build (id ya captureId se) ---
+    const query = {};
+    if (paymentId) {
+      if (!mongoose.Types.ObjectId.isValid(paymentId)) {
+        return res.status(400).json({ ok: false, error: 'invalid paymentId' });
+      }
+      query._id = paymentId;
+    }
+    if (captureId) {
+      query['paypal.captureId'] = captureId;
+    }
+
+    const doc = await Payment.findOne(query);
+    if (!doc) {
+      return res.status(404).json({ ok: false, error: 'Payment not found' });
+    }
+
+    const idToDelete = doc._id;
+
+    // ✅ Mongo se delete
+    await Payment.deleteOne({ _id: idToDelete });
+
+    // (Optional) yahan Firestore / Jobs / Events cleanup add kar sakte ho,
+    // agar tum payments ko Firestore me bhi mirror kar rahe ho.
+    // Filhaal safe simple: sirf Mongo Payment delete.
+
+    return res.json({
+      ok: true,
+      deletedId: String(idToDelete),
+    });
+  } catch (e) {
+    console.error('hard-delete error:', e);
+    next(e);
+  }
+});
+
+
 
 // -------- DEBUG: insert a captured Payment for testing monthly aggregation --------
 router.post('/__debug/insert', async (req, res, next) => {
@@ -1111,6 +1221,254 @@ router.post('/__debug/mark-void-by', async (req, res, next) => {
 
 
 
+// === Invoice-specific PayPal flow (public, email link se) ===
+router.post('/create-invoice-order', async (req, res) => {
+  try {
+    const { invoiceId } = req.body || {};
+    if (!invoiceId) {
+      return res.status(400).json({ ok: false, error: 'invoiceId required' });
+    }
+
+    // 🔹 yahan pe FS id + Mongo id dono support karo
+    let invoice = null;
+    if (mongoose.Types.ObjectId.isValid(invoiceId)) {
+      // proper Mongo ObjectId
+      invoice = await Invoice.findById(invoiceId);
+    } else {
+      // Firestore style id → fsId field
+      invoice = await Invoice.findOne({ fsId: invoiceId });
+    }
+
+    if (!invoice) {
+      return res.status(404).json({ ok: false, error: 'Invoice not found' });
+    }
+
+    const total = Number(
+      typeof invoice.balanceDue === 'number'
+        ? invoice.balanceDue
+        : (invoice.total || 0) - (invoice.amountPaid || 0)
+    );
+
+    if (!total || total <= 0) {
+      return res
+        .status(400)
+        .json({ ok: false, error: 'Nothing to pay for this invoice' });
+    }
+
+    const client = paypalClient();
+    const request = new paypalSdk.orders.OrdersCreateRequest();
+    request.prefer('return=representation');
+
+    // ⚠️ PayPal ko har transaction ke liye unique invoice_id chahiye
+    const baseInvoiceId = String(invoice.number || invoice._id);
+    const payPalInvoiceId = `${baseInvoiceId}-${Date.now()}`; // always unique
+
+    request.requestBody({
+      intent: 'CAPTURE',
+      purchase_units: [
+        {
+          amount: {
+            currency_code: 'USD',
+            value: total.toFixed(2),
+          },
+          description: `Invoice ${baseInvoiceId}`,
+          invoice_id: payPalInvoiceId,           // ✅ unique id
+          custom_id: String(invoice._id),        // optional trace
+        },
+      ],
+      application_context: {
+        brand_name: 'PropertySanta',
+        shipping_preference: 'NO_SHIPPING',
+        user_action: 'PAY_NOW',
+      },
+    });
+
+    let order;
+    try {
+      order = await client.execute(request);
+    } catch (err) {
+      const statusCode = err?.statusCode || err?._originalError?.statusCode;
+      const rawText = err?._originalError?.text;
+      const debugId =
+        err?._originalError?.headers?.['paypal-debug-id'] ||
+        err?.headers?.['paypal-debug-id'];
+
+      if (statusCode === 503) {
+        console.error('PayPal SERVICE_UNAVAILABLE in create-invoice-order', {
+          statusCode,
+          debugId,
+          rawText,
+        });
+
+        return res.status(503).json({
+          ok: false,
+          provider: 'paypal',
+          error: 'PAYPAL_SERVICE_UNAVAILABLE',
+          message: 'PayPal temporarily unavailable, please try again shortly.',
+          retryable: true,
+          debugId,
+        });
+      }
+
+      throw err;
+    }
+
+    const approveUrl =
+      (order.result.links || []).find((l) => l.rel === 'approve')?.href || null;
+
+    // 🔴 YAHAN SABSE IMPORTANT LINE: invoice link karo
+    const payment = await Payment.create({
+      type: 'one_time',
+      source: 'paypal_invoice',
+      status: 'created',
+      currency: 'USD',
+      amount: total,
+      gross: total,
+      invoice: invoice._id,                           // 🔥 LINK TO INVOICE
+      customerEmail: invoice.customerEmail || undefined,
+      paypal: {
+        orderId: order.result.id,
+        invoiceId: payPalInvoiceId,
+        rawCreate: order.result,
+      },
+    });
+
+    return res.json({
+      ok: true,
+      orderId: order.result.id,
+      paymentId: payment._id,
+      approveUrl,
+    });
+  } catch (err) {
+    console.error('create-invoice-order error', err);
+    return res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+
+
+
+
+
+// PayPal approve ke baad capture + invoice update
+
+router.post('/capture-invoice-order', async (req, res) => {
+  try {
+    const { orderId } = req.body || {};
+    if (!orderId) {
+      return res.status(400).json({ ok: false, error: 'orderId required' });
+    }
+
+    const client = paypalClient();
+    const request = new paypalSdk.orders.OrdersCaptureRequest(orderId);
+    request.requestBody({});
+
+    let capture;
+    try {
+      capture = await client.execute(request);
+    } catch (err) {
+      const statusCode = err?.statusCode || err?._originalError?.statusCode;
+      const debugId =
+        err?._originalError?.headers?.['paypal-debug-id'] ||
+        err?.headers?.['paypal-debug-id'];
+
+      if (statusCode === 503) {
+        console.error('PayPal SERVICE_UNAVAILABLE in capture-invoice-order', {
+          statusCode,
+          debugId,
+        });
+        return res.status(503).json({
+          ok: false,
+          provider: 'paypal',
+          error: 'PAYPAL_SERVICE_UNAVAILABLE',
+          message: 'PayPal temporarily unavailable, please try again shortly.',
+          retryable: true,
+          debugId,
+        });
+      }
+
+      throw err;
+    }
+
+    const result = capture.result;
+    const pu = (result.purchase_units || [])[0] || {};
+    const cap =
+      (pu.payments && pu.payments.captures && pu.payments.captures[0]) || null;
+
+    const paidAmount = cap
+      ? Number(cap.amount && cap.amount.value ? cap.amount.value : 0)
+      : 0;
+
+    // 🔹 1) Payment document update / create
+    let payment = await Payment.findOne({ 'paypal.orderId': orderId });
+
+    if (!payment) {
+      // ideally yahan kabhi na aaye, kyunki create-invoice-order ne Payment bana diya hoga
+      payment = await Payment.create({
+        type: 'one_time',
+        source: 'paypal_invoice',
+        status: 'captured',
+        currency: cap?.amount?.currency_code || 'USD',
+        amount: paidAmount,
+        paypal: {
+          orderId: orderId,
+          status: 'captured',
+          captureId: cap?.id,
+          rawCapture: result,
+        },
+      });
+    } else {
+      payment.status = 'captured';
+      payment.paypal = {
+        ...(payment.paypal || {}),
+        status: 'captured',
+        captureId: cap?.id,
+        rawCapture: result,
+      };
+      await payment.save();
+    }
+
+    // 🔹 2) Linked invoice ko update karo
+    if (payment.invoice) {
+      const invoice = await Invoice.findById(payment.invoice);
+      if (invoice) {
+        const alreadyPaid = Number(invoice.amountPaid || 0);
+        const total = Number(invoice.total || 0);
+        const newPaid = alreadyPaid + paidAmount;
+
+        invoice.amountPaid = newPaid;
+        invoice.balanceDue = Math.max(0, total - newPaid);
+
+        if (invoice.balanceDue <= 0.00001) {
+          invoice.status = 'paid';
+        } else if (newPaid > 0) {
+          invoice.status = 'partial';
+        }
+
+        if (!Array.isArray(invoice.payments)) {
+          invoice.payments = [];
+        }
+        const alreadyHas = invoice.payments.some((id) =>
+          id.equals ? id.equals(payment._id) : String(id) === String(payment._id)
+        );
+        if (!alreadyHas) {
+          invoice.payments.push(payment._id);
+        }
+
+        await invoice.save();
+      }
+    }
+
+    return res.json({
+      ok: true,
+      status: 'captured',
+      captureId: cap?.id,
+    });
+  } catch (err) {
+    console.error('capture-invoice-order error', err);
+    return res.status(500).json({ ok: false, error: err.message });
+  }
+});
 
 
 module.exports = router;

@@ -228,6 +228,10 @@ safeUse('/api/customer/tasks', require('./src/routes/customer/tasks.route'));
 safeUse('/api/customer/autopay', require('./src/routes/customer/autopay.route'));
 // safeUse('/api/payments/paypal/webhook', require('./src/routes/payments/paypal.webhook.route'));
 safeUse('/api/users/me', require('./src/routes/users.me.route'));
+safeUse('/api/payroll', require('./src/routes/payroll.route'));
+
+const receiptsRouter = require("./routes/receipts.routes");
+app.use("/api/receipts", receiptsRouter);
 
 
 

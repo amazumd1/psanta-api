@@ -12,7 +12,7 @@
     "fix:index:wo": "node ./src/scripts/fix_wo_index.js",
     "seed:contractBiz:phones": "node scripts/backfillContractBusinessPhones.js",
     "backfill:jobids": "node scripts/backfill-jobids.js --startAt=100 --batchSize=1000",
-  "seed:admin": "node -r dotenv/config scripts/seed-admin.js"
+    "seed:admin": "node -r dotenv/config scripts/seed-admin.js"
   },
   "keywords": [
     "cleaning",
@@ -39,6 +39,8 @@
     "mongoose": "^8.18.1",
     "multer": "^1.4.5-lts.1",
     "nanoid": "^5.1.6",
+    "node-fetch": "2",
+    "pdfkit": "^0.17.2",
     "socket.io": "^4.8.1",
     "twilio": "^5.10.2",
     "uuid": "^13.0.0"
