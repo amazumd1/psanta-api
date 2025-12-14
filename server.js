@@ -7,8 +7,14 @@ const { pathToFileURL } = require('url');
 const path = require('path');
 const fs = require('fs');
 const net = require('net');
-require('dotenv').config({ path: path.resolve(__dirname, '.env') });
-console.log('ENV loaded from', path.resolve(__dirname, '.env'), 'MONGODB_URI?', !!process.env.MONGODB_URI);
+// require('dotenv').config({ path: path.resolve(__dirname, '.env') });
+// console.log('ENV loaded from', path.resolve(__dirname, '.env'), 'MONGODB_URI?', !!process.env.MONGODB_URI);
+
+if (!process.env.VERCEL) {
+  require("dotenv").config({ path: path.resolve(__dirname, ".env") });
+  console.log("ENV loaded from", path.resolve(__dirname, ".env"));
+}
+
 const { auth } = require('./middleware/auth');
 const { requireRole } = require('./middleware/roles');
 const bcrypt = require('bcryptjs');
@@ -558,6 +564,8 @@ const initApp = async () => {
     // customer messages (was after mount in your file)
     safeUse("/api/customer/messages", require("./src/routes/customer/messages.route"));
 
+    safeUse("/api/admin/messages", require("./src/routes/admin/messages.route"));
+    
     // error handler should be LAST
     app.use((err, req, res, next) => {
       console.error("🔥 SERVER ERROR:", err.stack || err);
@@ -576,9 +584,10 @@ const initApp = async () => {
 
 /* -------------------- Local server start (only outside Vercel) -------------------- */
 const startServer = async () => {
+  await initApp();
+
   const http = require("http");
   const { attachIO } = require("./src/server/socket");
-  await initApp();
 
   const PORT = await findAvailablePort(process.env.PORT || 5000);
   const httpServer = http.createServer(app);
