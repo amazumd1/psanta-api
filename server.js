@@ -384,18 +384,18 @@ const updateFrontendEnv = (port) => {
 };
 
 /* -------------------- Mongo -------------------- */
-const connectDB = async () => {
-  try {
-    await mongoose.connect(process.env.MONGODB_URI);
-    console.log('✅ MongoDB connected successfully');
-  } catch (error) {
-    console.error('❌ MongoDB connection error:', error);
-    // process.exit(1);
-    throw error;
-  }
-  await require('./src/models/Job').syncIndexes();
+// const connectDB = async () => {
+//   try {
+//     await mongoose.connect(process.env.MONGODB_URI);
+//     console.log('✅ MongoDB connected successfully');
+//   } catch (error) {
+//     console.error('❌ MongoDB connection error:', error);
+//     // process.exit(1);
+//     throw error;
+//   }
+//   await require('./src/models/Job').syncIndexes();
 
-};
+// };
 const connectDB = async () => {
   if (!process.env.MONGODB_URI) {
     throw new Error("MONGODB_URI missing in environment variables (Vercel).");
