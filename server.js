@@ -3,7 +3,7 @@
 // CommonJS server
 const express = require('express');
 const mongoose = require('mongoose');
-const { pathToFileURL } = require('url');
+// const { pathToFileURL } = require('url');
 const path = require('path');
 const fs = require('fs');
 const net = require('net');
@@ -188,23 +188,40 @@ app.get('/__debug/wh-model', (req, res) => {
 });
 
 /* -------------------- ESM route helper -------------------- */
-async function mountESMRoutes(app) {
-  const add = async (mount, relPath) => {
-    const full = path.join(__dirname, relPath);
-    console.log('🔸 Loading ESM route:', full);
-    const mod = await import(pathToFileURL(full).href);
-    app.use(mount, mod.default || mod);
-    console.log('✅ Mounted:', mount, '←', relPath);
-  };
-  await add('/api/print', './src/routes/print.route.js');
-  app.use('/api/wh', auth, requireRole(['admin', 'warehouse']));
-  await add('/api/wh', './src/routes/wh/index.route.js');
-  await add('/api/wh', './src/routes/wh/pack.route.js');
-  await add('/api/wh', './src/routes/wh/orders.util.route.js');
-  await add('/api/wh', './src/routes/wh/jobs.route.js');
-  await add('/api/wh', './src/routes/wh/learning.route.js');
-  await add('/api/wh', './src/routes/wh/reco.route.js');
-  await add('/api/orders', './src/routes/orders.weight.route.js');
+// async function mountESMRoutes(app) {
+//   const add = async (mount, relPath) => {
+//     const full = path.join(__dirname, relPath);
+//     console.log('🔸 Loading ESM route:', full);
+//     const mod = await import(pathToFileURL(full).href);
+//     app.use(mount, mod.default || mod);
+//     console.log('✅ Mounted:', mount, '←', relPath);
+//   };
+//   await add('/api/print', './src/routes/print.route.js');
+//   app.use('/api/wh', auth, requireRole(['admin', 'warehouse']));
+//   await add('/api/wh', './src/routes/wh/index.route.js');
+//   await add('/api/wh', './src/routes/wh/pack.route.js');
+//   await add('/api/wh', './src/routes/wh/orders.util.route.js');
+//   await add('/api/wh', './src/routes/wh/jobs.route.js');
+//   await add('/api/wh', './src/routes/wh/learning.route.js');
+//   await add('/api/wh', './src/routes/wh/reco.route.js');
+//   await add('/api/orders', './src/routes/orders.weight.route.js');
+// }
+
+/* -------------------- Route mounts (Vercel-safe, no dynamic import) -------------------- */
+function mountRoutes() {
+  // print
+  safeUse("/api/print", require("./src/routes/print.route.js"));
+
+  // warehouse (protected)
+  safeUse("/api/wh", auth, requireRole(["admin", "warehouse"]), require("./src/routes/wh/index.route.js"));
+  safeUse("/api/wh", auth, requireRole(["admin", "warehouse"]), require("./src/routes/wh/pack.route.js"));
+  safeUse("/api/wh", auth, requireRole(["admin", "warehouse"]), require("./src/routes/wh/orders.util.route.js"));
+  safeUse("/api/wh", auth, requireRole(["admin", "warehouse"]), require("./src/routes/wh/jobs.route.js"));
+  safeUse("/api/wh", auth, requireRole(["admin", "warehouse"]), require("./src/routes/wh/learning.route.js"));
+  safeUse("/api/wh", auth, requireRole(["admin", "warehouse"]), require("./src/routes/wh/reco.route.js"));
+
+  // orders weight routes
+  safeUse("/api/orders", require("./src/routes/orders.weight.route.js"));
 }
 
 /* -------------------- CJS routes -------------------- */
@@ -379,6 +396,15 @@ const connectDB = async () => {
   await require('./src/models/Job').syncIndexes();
 
 };
+const connectDB = async () => {
+  if (!process.env.MONGODB_URI) {
+    throw new Error("MONGODB_URI missing in environment variables (Vercel).");
+  }
+  await mongoose.connect(process.env.MONGODB_URI);
+  console.log("✅ MongoDB connected successfully");
+  await require("./src/models/Job").syncIndexes();
+};
+
 
 /* -------------------- Seed (idempotent) -------------------- */
 const initializeDatabase = async () => {
@@ -559,13 +585,15 @@ const initApp = async () => {
     }
 
     // Mount the async-import routes
-    await mountESMRoutes(app);
+    // await mountESMRoutes(app);
+    mountRoutes();
+
 
     // customer messages (was after mount in your file)
     safeUse("/api/customer/messages", require("./src/routes/customer/messages.route"));
 
     safeUse("/api/admin/messages", require("./src/routes/admin/messages.route"));
-    
+
     // error handler should be LAST
     app.use((err, req, res, next) => {
       console.error("🔥 SERVER ERROR:", err.stack || err);
