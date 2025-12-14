@@ -13,6 +13,8 @@ const { auth } = require('./middleware/auth');
 const { requireRole } = require('./middleware/roles');
 const bcrypt = require('bcryptjs');
 const customerOrders = require('./src/routes/customer/orders.route');
+
+
 const cookieParser = require('cookie-parser');
 // If FIREBASE_SERVICE_ACCOUNT_JSON is provided, write it to /tmp and point GOOGLE_APPLICATION_CREDENTIALS
 if (process.env.FIREBASE_SERVICE_ACCOUNT_JSON && !process.env.GOOGLE_APPLICATION_CREDENTIALS) {
@@ -63,19 +65,43 @@ const cors = require('cors');
 // };
 
 
-function safeUse(mount, mod) {
-  // ESM/CJS normalize
-  const handler = mod && (mod.default || mod);
-  const isRouter =
-    typeof handler === 'function' ||
-    (handler && typeof handler.handle === 'function');
+// function safeUse(mount, mod) {
+//   // ESM/CJS normalize
+//   const handler = mod && (mod.default || mod);
+//   const isRouter =
+//     typeof handler === 'function' ||
+//     (handler && typeof handler.handle === 'function');
 
-  if (!isRouter) {
-    console.error('❌ Skipping mount:', mount, 'Invalid export:', handler);
-    return; // skip instead of crashing
+//   if (!isRouter) {
+//     console.error('❌ Skipping mount:', mount, 'Invalid export:', handler);
+//     return; // skip instead of crashing
+//   }
+//   app.use(mount, handler);
+// }
+
+function safeUse(mount, ...handlers) {
+  const normalized = handlers
+    .map((h) => (h && (h.default || h)))
+    .filter(Boolean);
+
+  if (!normalized.length) {
+    console.error("❌ safeUse skipped:", mount, "no handlers");
+    return;
   }
-  app.use(mount, handler);
+
+  const ok = normalized.every(
+    (h) => typeof h === "function" || typeof h?.handle === "function"
+  );
+
+  if (!ok) {
+    console.error("❌ safeUse skipped:", mount, "invalid handler(s)");
+    return;
+  }
+
+  app.use(mount, ...normalized);
 }
+
+
 
 app.use(cookieParser(process.env.COOKIE_SECRET || undefined));
 
@@ -341,7 +367,8 @@ const connectDB = async () => {
     console.log('✅ MongoDB connected successfully');
   } catch (error) {
     console.error('❌ MongoDB connection error:', error);
-    process.exit(1);
+    // process.exit(1);
+    throw error;
   }
   await require('./src/models/Job').syncIndexes();
 
@@ -443,66 +470,132 @@ const initializeDatabase = async () => {
 
 
 /* -------------------- Start -------------------- */
-const startServer = async () => {
-  await connectDB();
+// const startServer = async () => {
+//   await connectDB();
 
-  // --- WO model compile guard ---
-  try {
-    const mongoose = require('mongoose');
-    const canonicalPath = require('path').resolve(__dirname, './src/models/WarehouseOrder');
+//   // --- WO model compile guard ---
+//   try {
+//     const mongoose = require('mongoose');
+//     const canonicalPath = require('path').resolve(__dirname, './src/models/WarehouseOrder');
 
-    const existing = mongoose.models.WarehouseOrder;
-    if (existing) {
-      const t = existing.schema.path('orderId')?.instance;
-      if (t !== 'String') {
-        console.warn('⚠️ Recompiling WarehouseOrder with String orderId (was:', t, ')');
-        mongoose.deleteModel('WarehouseOrder');
-        delete require.cache[require.resolve(canonicalPath)];
-      }
+//     const existing = mongoose.models.WarehouseOrder;
+//     if (existing) {
+//       const t = existing.schema.path('orderId')?.instance;
+//       if (t !== 'String') {
+//         console.warn('⚠️ Recompiling WarehouseOrder with String orderId (was:', t, ')');
+//         mongoose.deleteModel('WarehouseOrder');
+//         delete require.cache[require.resolve(canonicalPath)];
+//       }
+//     }
+//     require('./src/models/WarehouseOrder'); // force-load canonical
+//     const check = mongoose.models.WarehouseOrder?.schema.path('orderId')?.instance;
+//     console.log('✅ WarehouseOrder.orderId type:', check);
+//   } catch (e) {
+//     console.error('❌ WO model fix failed:', e);
+//   }
+
+//   // --- seed + routes mount ---
+//   await initializeDatabase();
+//   await mountESMRoutes(app);
+
+//   // ✅ Explicit CJS mounts for messages (no ESM ambiguity)
+//   safeUse('/api/customer/messages', require('./src/routes/customer/messages.route'));
+//   safeUse('/api/admin/messages', require('./src/routes/admin/messages.route'));
+//   console.log('✅ Mounted via safeUse: /api/customer/messages* and /api/admin/messages*');
+
+//   // --- error handler MUST be after all mounts ---
+//   app.use((err, req, res, next) => {
+//     console.error('Unhandled error:', err);
+//     res.status(500).json({ ok: false, error: err.message });
+//   });
+
+//   // --- create server + socket.io attach ---
+//   const http = require('http');
+//   const httpServer = http.createServer(app);
+//   const { attachIO } = require('./src/server/socket');
+//   attachIO(httpServer);
+
+//   // --- bind port: prod = exact PORT; dev = findAvailablePort ---
+//   const isProd = process.env.NODE_ENV === 'production';
+//   const bindPort = isProd ? PORT : await findAvailablePort(PORT);
+
+//   httpServer.listen(bindPort, () => {
+//     console.log(`🚀 Server running on port ${bindPort}`);
+//     console.log(`📱 API available at http://localhost:${bindPort}`);
+//     console.log(`🔗 Health check: http://localhost:${bindPort}/health`);
+//     if (!isProd) {
+//       updateFrontendEnv(bindPort);
+//       if (bindPort !== PORT) console.log(`⚠️ Port ${PORT} was in use, using ${bindPort}`);
+//     }
+//   });
+// };
+
+// startServer();
+
+
+
+/* -------------------- Init (Vercel-safe) -------------------- */
+let _initPromise = null;
+
+const initApp = async () => {
+  if (_initPromise) return _initPromise;
+
+  _initPromise = (async () => {
+    // DB connect once
+    if (mongoose.connection.readyState !== 1) {
+      await connectDB();
+      await require("./src/models/Job").syncIndexes();
     }
-    require('./src/models/WarehouseOrder'); // force-load canonical
-    const check = mongoose.models.WarehouseOrder?.schema.path('orderId')?.instance;
-    console.log('✅ WarehouseOrder.orderId type:', check);
-  } catch (e) {
-    console.error('❌ WO model fix failed:', e);
-  }
 
-  // --- seed + routes mount ---
-  await initializeDatabase();
-  await mountESMRoutes(app);
+    // Optional: Seed only if you explicitly enable it
+    if (process.env.SEED_ON_START === "true") {
+      await initializeDatabase();
+    }
 
-  // ✅ Explicit CJS mounts for messages (no ESM ambiguity)
-  safeUse('/api/customer/messages', require('./src/routes/customer/messages.route'));
-  safeUse('/api/admin/messages', require('./src/routes/admin/messages.route'));
-  console.log('✅ Mounted via safeUse: /api/customer/messages* and /api/admin/messages*');
+    // Mount the async-import routes
+    await mountESMRoutes(app);
 
-  // --- error handler MUST be after all mounts ---
-  app.use((err, req, res, next) => {
-    console.error('Unhandled error:', err);
-    res.status(500).json({ ok: false, error: err.message });
-  });
+    // customer messages (was after mount in your file)
+    safeUse("/api/customer/messages", require("./src/routes/customer/messages.route"));
 
-  // --- create server + socket.io attach ---
-  const http = require('http');
+    // error handler should be LAST
+    app.use((err, req, res, next) => {
+      console.error("🔥 SERVER ERROR:", err.stack || err);
+      res.status(err.status || 500).json({
+        error: "Internal server error",
+        message: err.message,
+        ...(process.env.NODE_ENV !== "production" ? { stack: err.stack } : {}),
+      });
+    });
+
+    return true;
+  })();
+
+  return _initPromise;
+};
+
+/* -------------------- Local server start (only outside Vercel) -------------------- */
+const startServer = async () => {
+  const http = require("http");
+  const { attachIO } = require("./src/server/socket");
+  await initApp();
+
+  const PORT = await findAvailablePort(process.env.PORT || 5000);
   const httpServer = http.createServer(app);
-  const { attachIO } = require('./src/server/socket');
+
+  // ⚠️ Vercel pe socket.io mat chalao (local only)
   attachIO(httpServer);
 
-  // --- bind port: prod = exact PORT; dev = findAvailablePort ---
-  const isProd = process.env.NODE_ENV === 'production';
-  const bindPort = isProd ? PORT : await findAvailablePort(PORT);
-
-  httpServer.listen(bindPort, () => {
-    console.log(`🚀 Server running on port ${bindPort}`);
-    console.log(`📱 API available at http://localhost:${bindPort}`);
-    console.log(`🔗 Health check: http://localhost:${bindPort}/health`);
-    if (!isProd) {
-      updateFrontendEnv(bindPort);
-      if (bindPort !== PORT) console.log(`⚠️ Port ${PORT} was in use, using ${bindPort}`);
-    }
+  httpServer.listen(PORT, () => {
+    console.log(`🚀 Server running on port ${PORT}`);
+    updateFrontendEnv(PORT).catch(console.error);
   });
 };
 
-startServer();
+// ✅ Important: Vercel pe auto-start nahi karna
+if (!process.env.VERCEL) {
+  startServer();
+}
 
-
+// ✅ Export for Vercel handler
+module.exports = { app, initApp };
