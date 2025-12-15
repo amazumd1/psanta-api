@@ -124,17 +124,28 @@ const DEV_ORIGINS = new Set(DEV_PORTS.flatMap(p => [
 const PROD_ALLOW = (process.env.CORS_ORIGINS || '')
   .split(',').map(s => s.trim()).filter(Boolean);
 
+const VERCEL_WAREHOUSE_RE = /^https:\/\/psanta-warehouse(?:-[a-z0-9-]+)?\.vercel\.app$/i;
+const VERCEL_OPS_RE = /^https:\/\/psanta-ops-app(?:-[a-z0-9-]+)?\.vercel\.app$/i;
+
 const corsCfg = {
   origin: (origin, cb) => {
     if (!origin) return cb(null, true);
     if (DEV_ORIGINS.has(origin)) return cb(null, true);
+
+    // ✅ allow exact env list
     if (PROD_ALLOW.includes(origin)) return cb(null, true);
+
+    // ✅ allow Vercel preview + prod domains for these apps
+    if (VERCEL_WAREHOUSE_RE.test(origin)) return cb(null, true);
+    if (VERCEL_OPS_RE.test(origin)) return cb(null, true);
+
     return cb(null, false);
   },
   credentials: true,
   exposedHeaders: ['Content-Length', 'Content-Type', 'Idempotency-Key'],
   maxAge: 600,
 };
+
 // app.use(cors(corsCfg));
 app.use(cors(corsCfg));
 app.options('*', cors(corsCfg));
@@ -161,6 +172,15 @@ app.get('/health', (req, res) => {
     timestamp: new Date().toISOString(),
     environment: process.env.NODE_ENV || 'development',
   });
+});
+// ✅ Home (so Vercel "/" doesn't 404)
+app.get("/", (req, res) => {
+  res.status(200).send("PSanta API is running ✅  Try /health or /__debug/routes");
+});
+
+// ✅ Favicon (browser auto-hits it)
+app.get("/favicon.ico", (req, res) => {
+  res.status(204).end();
 });
 
 /* -------------------- Quick route list -------------------- */
@@ -625,7 +645,7 @@ const startServer = async () => {
 
   httpServer.listen(PORT, () => {
     console.log(`🚀 Server running on port ${PORT}`);
-    updateFrontendEnv(PORT).catch(console.error);
+    updateFrontendEnv(PORT);
   });
 };
 
@@ -635,4 +655,15 @@ if (!process.env.VERCEL) {
 }
 
 // ✅ Export for Vercel handler
-module.exports = { app, initApp };
+// ✅ Vercel handler: ensure init happens, then let Express handle the request
+const vercelHandler = async (req, res) => {
+  await initApp();
+  return app(req, res);
+};
+
+// (optional) keep access to app/initApp if you import elsewhere
+vercelHandler.app = app;
+vercelHandler.initApp = initApp;
+
+module.exports = vercelHandler;
+
