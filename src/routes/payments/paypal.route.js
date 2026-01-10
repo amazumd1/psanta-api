@@ -18,6 +18,9 @@ const { auth } = require('../../../middleware/auth'); // top of file
 const Counter = require('../../models/Counter');
 const mongoose = require('mongoose');
 
+const OPS_BASE_URL = process.env.OPS_BASE_URL || 'https://psanta-ops.vercel.app';
+
+
 
 const PORTAL_JWT_TTL = process.env.CP_JWT_TTL || '7d';              // e.g. '7d'
 const PORTAL_JWT_TTL_MS =
@@ -496,7 +499,7 @@ router.post('/capture-order', async (req, res) => {
     //   console.warn('invoice create failed:', e.message);
     // }
 
-        // Create one paid invoice per Payment (idempotent)
+    // Create one paid invoice per Payment (idempotent)
     try {
       const lineAmt = Number(saved?.amount || 0);
       const exists = await Invoice.findOne({ payments: saved._id }).lean();
@@ -512,7 +515,7 @@ router.post('/capture-order', async (req, res) => {
           // 🔥 NEW: year + profitChannel PlanningProfit ke liye
           year,
           profitChannel: saved.profitChannel || 'customer',
-          
+
 
           lines: [
             {
@@ -1280,6 +1283,8 @@ router.post('/create-invoice-order', async (req, res) => {
         brand_name: 'PropertySanta',
         shipping_preference: 'NO_SHIPPING',
         user_action: 'PAY_NOW',
+        return_url: `${OPS_BASE_URL}/pay-invoice/${invoiceId}`,
+        cancel_url: `${OPS_BASE_URL}/pay-invoice/${invoiceId}?canceled=1`,
       },
     });
 
