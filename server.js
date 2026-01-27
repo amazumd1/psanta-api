@@ -21,6 +21,7 @@ const bcrypt = require('bcryptjs');
 const customerOrders = require('./src/routes/customer/orders.route');
 
 
+
 const cookieParser = require('cookie-parser');
 // If FIREBASE_SERVICE_ACCOUNT_JSON is provided, write it to /tmp and point GOOGLE_APPLICATION_CREDENTIALS
 if (process.env.FIREBASE_SERVICE_ACCOUNT_JSON && !process.env.GOOGLE_APPLICATION_CREDENTIALS) {
@@ -260,6 +261,14 @@ app.use('/api/users', userRoutes);
 app.use('/api/host', require('./routes/host.onboarding'));
 app.use('/api/admin', require('./routes/admin.orders'));
 app.use('/api/pricing', require('./routes/pricing.routes'));
+app.use(
+  "/api/invite",
+  auth,
+  requireRole(["admin"]),
+  require("./routes/invite.routes")
+);
+
+
 
 require('./src/routes/admin/suggestions.route.js')(app);
 // app.use('/api/alerts', require('./src/routes/alerts.route'));
