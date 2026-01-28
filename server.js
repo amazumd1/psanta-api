@@ -10,6 +10,9 @@ const net = require('net');
 // require('dotenv').config({ path: path.resolve(__dirname, '.env') });
 // console.log('ENV loaded from', path.resolve(__dirname, '.env'), 'MONGODB_URI?', !!process.env.MONGODB_URI);
 
+const { firebaseAuth, requireOpsAdmin } = require("./middleware/firebaseAuth");
+const inviteRoutes = require("./routes/invite.routes");
+
 if (!process.env.VERCEL) {
   require("dotenv").config({ path: path.resolve(__dirname, ".env") });
   console.log("ENV loaded from", path.resolve(__dirname, ".env"));
@@ -261,10 +264,6 @@ app.use('/api/users', userRoutes);
 app.use('/api/host', require('./routes/host.onboarding'));
 app.use('/api/admin', require('./routes/admin.orders'));
 app.use('/api/pricing', require('./routes/pricing.routes'));
-
-const { firebaseAuth, requireOpsAdmin } = require("./middleware/firebaseAuth");
-const inviteRoutes = require("./routes/invite.routes");
-
 app.use("/api/invite", firebaseAuth, requireOpsAdmin, inviteRoutes);
 
 
@@ -307,9 +306,7 @@ safeUse('/api/customer/autopay', require('./src/routes/customer/autopay.route'))
 // safeUse('/api/payments/paypal/webhook', require('./src/routes/payments/paypal.webhook.route'));
 safeUse('/api/users/me', require('./src/routes/users.me.route'));
 safeUse('/api/payroll', require('./src/routes/payroll.route'));
-
-const receiptsRouter = require("./routes/receipts.routes");
-app.use("/api/receipts", receiptsRouter);
+safeUse("/api/receipts", require("./routes/receipts.routes"));
 
 
 
