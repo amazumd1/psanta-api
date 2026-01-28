@@ -261,12 +261,12 @@ app.use('/api/users', userRoutes);
 app.use('/api/host', require('./routes/host.onboarding'));
 app.use('/api/admin', require('./routes/admin.orders'));
 app.use('/api/pricing', require('./routes/pricing.routes'));
-app.use(
-  "/api/invite",
-  auth,
-  requireRole(["admin"]),
-  require("./routes/invite.routes")
-);
+
+const { firebaseAuth, requireOpsAdmin } = require("./middleware/firebaseAuth");
+const inviteRoutes = require("./routes/invite.routes");
+
+app.use("/api/invite", firebaseAuth, requireOpsAdmin, inviteRoutes);
+
 
 
 
