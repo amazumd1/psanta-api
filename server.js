@@ -162,7 +162,7 @@ app.post('/api/payments/paypal/webhook',
 );
 
 /* -------------------- Body parsing -------------------- */
-app.use(express.json({ limit: '10mb' }));
+app.use(express.json({ limit: '25mb' }));
 app.use(express.urlencoded({ extended: true }));
 
 /* -------------------- Static -------------------- */
@@ -265,7 +265,8 @@ app.use('/api/host', require('./routes/host.onboarding'));
 app.use('/api/admin', require('./routes/admin.orders'));
 app.use('/api/pricing', require('./routes/pricing.routes'));
 app.use("/api/invite", firebaseAuth, requireOpsAdmin, inviteRoutes);
-
+app.use("/api/tx", auth, require("./routes/tx.screenshot"));
+app.use("/api/uploads", auth, require("./routes/cloudinary.upload"));
 
 
 
