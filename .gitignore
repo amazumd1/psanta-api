@@ -17,3 +17,4 @@ serviceAccount*.json
 *.p12
 
 .secrets/
+.vercel
