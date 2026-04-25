@@ -146,22 +146,25 @@ const DEV_ORIGINS = new Set(DEV_PORTS.flatMap(p => [
 
 // comma-separated list: https://your-front.vercel.app,https://your-warehouse.netlify.app
 const PROD_ALLOW = (process.env.CORS_ORIGINS || '')
-  .split(',').map(s => s.trim()).filter(Boolean);
+  .split(',')
+  .map((s) => s.trim().replace(/\/$/, ''))
+  .filter(Boolean);
 
-const VERCEL_WAREHOUSE_RE = /^https:\/\/psanta-warehouse(?:-[a-z0-9-]+)?\.vercel\.app$/i;
-const VERCEL_OPS_RE = /^https:\/\/psanta-ops-app(?:-[a-z0-9-]+)?\.vercel\.app$/i;
+const PROPERTY_SANTA_RE = /^https:\/\/([a-z0-9-]+\.)?propertysanta\.com$/i;
+
+const VERCEL_PREVIEW_RE =
+  /^https:\/\/psanta-(ops|customer|api|warehouse|cleaner|admin)(?:-[a-z0-9-]+)?\.vercel\.app$/i;
 
 const corsCfg = {
   origin: (origin, cb) => {
     if (!origin) return cb(null, true);
-    if (DEV_ORIGINS.has(origin)) return cb(null, true);
 
-    // ✅ allow exact env list
-    if (PROD_ALLOW.includes(origin)) return cb(null, true);
+    const cleanOrigin = String(origin).trim().replace(/\/$/, '');
 
-    // ✅ allow Vercel preview + prod domains for these apps
-    if (VERCEL_WAREHOUSE_RE.test(origin)) return cb(null, true);
-    if (VERCEL_OPS_RE.test(origin)) return cb(null, true);
+    if (DEV_ORIGINS.has(cleanOrigin)) return cb(null, true);
+    if (PROD_ALLOW.includes(cleanOrigin)) return cb(null, true);
+    if (PROPERTY_SANTA_RE.test(cleanOrigin)) return cb(null, true);
+    if (VERCEL_PREVIEW_RE.test(cleanOrigin)) return cb(null, true);
 
     return cb(null, false);
   },
@@ -170,7 +173,6 @@ const corsCfg = {
   maxAge: 600,
 };
 
-// app.use(cors(corsCfg));
 app.use(cors(corsCfg));
 app.options('*', cors(corsCfg));
 
