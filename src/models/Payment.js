@@ -26,6 +26,7 @@
 
 // models/Payment.js
 const mongoose = require('mongoose');
+const { addTenantScope } = require('../../lib/mongooseTenant');
 
 const PaymentSchema = new mongoose.Schema(
   {
@@ -82,5 +83,14 @@ const PaymentSchema = new mongoose.Schema(
   },
   { timestamps: true }
 );
+
+addTenantScope(PaymentSchema, {
+  extraIndexes: [
+    { fields: { tenantId: 1, status: 1, createdAt: -1 } },
+    { fields: { tenantId: 1, userId: 1, createdAt: -1 } },
+    { fields: { tenantId: 1, propertyId: 1, createdAt: -1 } },
+    { fields: { tenantId: 1, "paypal.orderId": 1 }, options: { sparse: true } },
+  ],
+});
 
 module.exports = mongoose.model('Payment', PaymentSchema);

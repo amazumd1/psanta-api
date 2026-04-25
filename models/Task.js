@@ -1,4 +1,5 @@
 // services/api/models/Task.js
+const { addTenantScope } = require('../lib/mongooseTenant');
 const { Schema, model, models } = require('mongoose');
 
 /* Subdocs */
@@ -68,6 +69,13 @@ const TaskSchema = new Schema({
 TaskSchema.index({ propertyId: 1 });
 TaskSchema.index({ isActive: 1 });
 TaskSchema.index({ createdAt: -1 });
+
+addTenantScope(TaskSchema, {
+  extraIndexes: [
+    { fields: { tenantId: 1, jobId: 1 } },
+    { fields: { tenantId: 1, assignedTo: 1, scheduledTime: 1 } },
+  ],
+});
 
 /* GUARD to prevent OverwriteModelError */
 module.exports = models.Task || model('Task', TaskSchema);

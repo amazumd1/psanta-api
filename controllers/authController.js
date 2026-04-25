@@ -1,6 +1,7 @@
 const jwt = require('jsonwebtoken');
 const User = require('../models/User');
 const { validationResult } = require('express-validator');
+const { ensureUserTenantContext } = require("../lib/tenantBootstrap");
 
 // --- add at top (below imports) ---
 const COOKIE_NAME = 'authToken';
@@ -21,13 +22,42 @@ function clearAuthCookie(res) {
 
 
 // Generate JWT token
-const generateToken = (userId) => {
+const generateToken = (user) => {
   return jwt.sign(
-    { userId },
+    {
+      userId: String(user._id),
+      tokenVersion: Number(user.tokenVersion || 0),
+      authType: "password",
+      legacy: true,
+    },
     process.env.JWT_SECRET,
-    { expiresIn: process.env.JWT_EXPIRES_IN || '7d' }
+    { expiresIn: process.env.JWT_EXPIRES_IN || "7d" }
   );
 };
+
+async function resolveTenantSession(user) {
+  const fallbackActiveTenantIds = Array.isArray(user?.activeTenantIds)
+    ? user.activeTenantIds.map((x) => String(x || "").trim()).filter(Boolean)
+    : [];
+
+  const fallback = {
+    currentTenantId: String(user?.defaultTenantId || "").trim() || fallbackActiveTenantIds[0] || null,
+    activeTenantIds: fallbackActiveTenantIds,
+    memberships: [],
+  };
+
+  try {
+    return await ensureUserTenantContext(user, {
+      firebaseUid: user?.firebaseUid || "",
+      userId: String(user?._id || ""),
+      email: user.email,
+      displayName: user.name,
+    });
+  } catch (err) {
+    console.error("resolveTenantSession failed:", err);
+    return fallback;
+  }
+}
 
 // Sign up new user
 const signUp = async (req, res) => {
@@ -73,24 +103,29 @@ const signUp = async (req, res) => {
       isActive: true
     });
 
-    await user.save();
+await user.save();
+const tenantSession = await resolveTenantSession(user);
 
-    const token = generateToken(user._id);
-    setAuthCookie(res, token);
+const token = generateToken(user);
+setAuthCookie(res, token);
 
-    // ✅ Top-level {token, user} response, no password
-    res.status(201).json({
-      success: true,
-      token,
-      user: {
-        _id: user._id,
-        name: user.name,
-        email: user.email,
-        role: user.role,
-        isActive: user.isActive,
-        phone: user.phone ?? ''
-      }
-    });
+res.status(201).json({
+  success: true,
+  token,
+  currentTenantId: tenantSession.currentTenantId,
+  activeTenantIds: tenantSession.activeTenantIds,
+  memberships: tenantSession.memberships,
+  user: {
+    _id: user._id,
+    name: user.name,
+    email: user.email,
+    role: user.role,
+    isActive: user.isActive,
+    phone: user.phone ?? '',
+    defaultTenantId: tenantSession.currentTenantId,
+    activeTenantIds: tenantSession.activeTenantIds,
+  }
+});
   } catch (error) {
     console.error('Sign up error:', error);
     res.status(500).json({
@@ -133,23 +168,29 @@ const loginWithPassword = async (req, res) => {
 
     user.lastLogin = new Date();
     await user.save();
+    const tenantSession = await resolveTenantSession(user);
 
-    const token = generateToken(user._id);
+    const token = generateToken(user);
     setAuthCookie(res, token);
 
     // ✅ Top-level {token, user} response
     res.json({
-      success: true,
-      token,
-      user: {
-        _id: user._id,
-        name: user.name,
-        email: user.email,
-        role: user.role,
-        isActive: user.isActive,
-        phone: user.phone ?? ''
-      }
-    });
+  success: true,
+  token,
+  currentTenantId: tenantSession.currentTenantId,
+  activeTenantIds: tenantSession.activeTenantIds,
+  memberships: tenantSession.memberships,
+  user: {
+    _id: user._id,
+    name: user.name,
+    email: user.email,
+    role: user.role,
+    isActive: user.isActive,
+    phone: user.phone ?? "",
+    defaultTenantId: tenantSession.currentTenantId,
+    activeTenantIds: tenantSession.activeTenantIds,
+  }
+});
   } catch (error) {
     console.error('Login error:', error);
     res.status(500).json({
@@ -232,23 +273,29 @@ const loginWithOTP = async (req, res) => {
     user.otpExpiresAt = undefined;
     user.lastLogin = new Date();
     await user.save();
+    const tenantSession = await resolveTenantSession(user);
 
-    const token = generateToken(user._id);
+    const token = generateToken(user);
     setAuthCookie(res, token);
 
     // ✅ Top-level {token, user} response
-    res.json({
-      success: true,
-      token,
-      user: {
-        _id: user._id,
-        name: user.name,
-        email: user.email,
-        role: user.role,
-        isActive: user.isActive,
-        phone: user.phone ?? ''
-      }
-    });
+res.json({
+  success: true,
+  token,
+  currentTenantId: tenantSession.currentTenantId,
+  activeTenantIds: tenantSession.activeTenantIds,
+  memberships: tenantSession.memberships,
+  user: {
+    _id: user._id,
+    name: user.name,
+    email: user.email,
+    role: user.role,
+    isActive: user.isActive,
+    phone: user.phone ?? "",
+    defaultTenantId: tenantSession.currentTenantId,
+    activeTenantIds: tenantSession.activeTenantIds,
+  }
+});
   } catch (error) {
     console.error('OTP login error:', error);
     res.status(500).json({
@@ -269,17 +316,24 @@ const getCurrentUser = async (req, res) => {
       });
     }
 
-    res.json({
-      success: true,
-      user: {
-        _id: user._id,
-        name: user.name,
-        email: user.email,
-        role: user.role,
-        isActive: user.isActive,
-        phone: user.phone ?? ''
-      }
-    });
+const tenantSession = await resolveTenantSession(user);
+
+res.json({
+  success: true,
+  currentTenantId: tenantSession.currentTenantId,
+  activeTenantIds: tenantSession.activeTenantIds,
+  memberships: tenantSession.memberships,
+  user: {
+    _id: user._id,
+    name: user.name,
+    email: user.email,
+    role: user.role,
+    isActive: user.isActive,
+    phone: user.phone ?? "",
+    defaultTenantId: tenantSession.currentTenantId,
+    activeTenantIds: tenantSession.activeTenantIds,
+  }
+});
   } catch (error) {
     console.error('Get current user error:', error);
     res.status(500).json({
@@ -306,7 +360,7 @@ const refreshToken = async (req, res) => {
         message: 'User not found'
       });
     }
-    const token = generateToken(user._id);
+    const token = generateToken(user);
  setAuthCookie(res, token);
  res.json({ success: true, token });
   } catch (error) {

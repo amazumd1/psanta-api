@@ -1,20 +1,57 @@
 // services/api/src/routes/invoices.route.js
 const express = require('express');
 const router = express.Router();
+const { body, validationResult } = require('express-validator');
 const Invoice = require('../models/Invoice');
 const Payment = require('../models/Payment');
 const fetch = require('node-fetch');
 const { cloudinary } = require('../services/cloudinary');
 const mongoose = require('mongoose');
+const { auth: requireAuth } = require("../../middleware/auth");
+const { requireTenantAccess } = require("../../middleware/tenantAccess");
+const { makeRateLimiter } = require("../../middleware/rateLimit");
 
 
-// this is for manual invoices -->
+const publicInvoiceLimiter = makeRateLimiter({
+  windowMs: 60_000,
+  max: process.env.NODE_ENV === "production" ? 120 : 300,
+  keyPrefix: "invoice_public",
+});
+
+const syncFromFsLimiter = makeRateLimiter({
+  windowMs: 60_000,
+  max: process.env.NODE_ENV === "production" ? 30 : 120,
+  keyPrefix: "invoice_sync",
+});
+
+function validateRequest(req, res, next) {
+  const result = validationResult(req);
+  if (result.isEmpty()) return next();
+
+  return res.status(400).json({
+    ok: false,
+    error: "validation_failed",
+    details: result.array().map((item) => ({
+      field: item.path,
+      message: item.msg,
+    })),
+  });
+}
+
+function requireNonProdDebug(req, res, next) {
+  if (process.env.NODE_ENV === "production") {
+    return res.status(404).json({ ok: false, error: "Not found" });
+  }
+  return next();
+}
+
+router.use("/__debug", requireNonProdDebug);
 
 
 // this is for manual invoices -->
 
 // PUBLIC: email / pay link ke liye lightweight invoice view (no auth)
-router.get('/public/:invoiceId', async (req, res, next) => {
+router.get('/public/:invoiceId', publicInvoiceLimiter, async (req, res, next) => {
   try {
     const { invoiceId } = req.params;
 
@@ -73,82 +110,108 @@ router.get('/public/:invoiceId', async (req, res, next) => {
 
 // PUBLIC: ops-app Firestore invoice ko Mongo me sync/upsert karne ke liye
 // body me fsId etc aayega
-router.post('/sync-from-fs', async (req, res, next) => {
-  try {
-    const {
-      fsId,
-      number,
-      issueDate,
-      dueDate,
-      status = 'issued',
-      subtotal = 0,
-      taxTotal = 0,
-      discountTotal = 0,
-      total = 0,
-      amountPaid = 0,
-      balanceDue,
-      customerName,
-      customerEmail,
-      customerAddress,
-      lineItems = [],
-    } = req.body || {};
+router.post(
+  '/sync-from-fs',
+  syncFromFsLimiter,
+  requireAuth,
+  requireTenantAccess,
+  [
+    body('fsId').isString().trim().notEmpty(),
+    body('number').optional({ nullable: true }).isString().trim(),
+    body('issueDate').optional({ nullable: true }).isString(),
+    body('dueDate').optional({ nullable: true }).isString(),
+    body('status').optional({ nullable: true }).isString().trim(),
+    body('subtotal').optional({ nullable: true }).isNumeric(),
+    body('taxTotal').optional({ nullable: true }).isNumeric(),
+    body('discountTotal').optional({ nullable: true }).isNumeric(),
+    body('total').optional({ nullable: true }).isNumeric(),
+    body('amountPaid').optional({ nullable: true }).isNumeric(),
+    body('balanceDue').optional({ nullable: true }).isNumeric(),
+    body('customerName').optional({ nullable: true }).isString(),
+    body('customerEmail').optional({ checkFalsy: true }).isEmail(),
+    body('customerAddress').optional({ nullable: true }).isString(),
+    body('lineItems').optional({ nullable: true }).isArray(),
+  ],
+  validateRequest,
+  async (req, res, next) => {
+    try {
+      const {
+        fsId,
+        number,
+        issueDate,
+        dueDate,
+        status = 'issued',
+        subtotal = 0,
+        taxTotal = 0,
+        discountTotal = 0,
+        total = 0,
+        amountPaid = 0,
+        balanceDue,
+        customerName,
+        customerEmail,
+        customerAddress,
+        lineItems = [],
+      } = req.body || {};
 
-    if (!fsId) {
-      return res.status(400).json({ ok: false, error: 'fsId required' });
+      if (!fsId) {
+        return res.status(400).json({ ok: false, error: 'fsId required' });
+      }
+
+      const safeSubtotal = Number(subtotal) || 0;
+      const safeTax = Number(taxTotal) || 0;
+      const safeDiscount = Number(discountTotal) || 0;
+      const safeTotal =
+        Number(total) || Number((safeSubtotal + safeTax - safeDiscount).toFixed(2));
+      const safePaid = Number(amountPaid) || 0;
+
+      let safeBalance =
+        typeof balanceDue === 'number'
+          ? Number(balanceDue)
+          : Number((safeTotal - safePaid).toFixed(2));
+
+      if (!Number.isFinite(safeBalance)) safeBalance = 0;
+
+      const update = {
+        fsId,
+        number: number || fsId,
+        issueDate: issueDate || null,
+        dueDate: dueDate || null,
+        status,
+        subtotal: safeSubtotal,
+        tax: safeTax,
+        discountTotal: safeDiscount,
+        total: safeTotal,
+        amountPaid: safePaid,
+        balanceDue: safeBalance,
+        customerName: customerName || null,
+        customerEmail: customerEmail || null,
+        customerAddress: customerAddress || null,
+        lineItems,
+      };
+
+      const doc = await Invoice.findOneAndUpdate(
+        { tenantId: req.tenantId, fsId },
+        { $set: { ...update, tenantId: req.tenantId } },
+        { new: true, upsert: true }
+      ).lean();
+
+      return res.json({ ok: true, data: doc });
+    } catch (err) {
+      next(err);
     }
-
-    const safeSubtotal = Number(subtotal) || 0;
-    const safeTax = Number(taxTotal) || 0;
-    const safeDiscount = Number(discountTotal) || 0;
-    const safeTotal =
-      Number(total) || Number((safeSubtotal + safeTax - safeDiscount).toFixed(2));
-    const safePaid = Number(amountPaid) || 0;
-
-    let safeBalance =
-      typeof balanceDue === 'number'
-        ? Number(balanceDue)
-        : Number((safeTotal - safePaid).toFixed(2));
-
-    if (!Number.isFinite(safeBalance)) safeBalance = 0;
-
-    const update = {
-      fsId,
-      number: number || fsId,
-      issueDate: issueDate || null,
-      dueDate: dueDate || null,
-      status,
-      subtotal: safeSubtotal,
-      tax: safeTax,
-      discountTotal: safeDiscount,
-      total: safeTotal,
-      amountPaid: safePaid,
-      balanceDue: safeBalance,
-      customerName: customerName || null,
-      customerEmail: customerEmail || null,
-      customerAddress: customerAddress || null,
-      lineItems,
-    };
-
-    const doc = await Invoice.findOneAndUpdate(
-      { fsId },
-      { $set: update },
-      { new: true, upsert: true }
-    ).lean();
-
-    return res.json({ ok: true, data: doc });
-  } catch (err) {
-    next(err);
-  }
-});
+  });
 
 
 
-// manual invoice end
+router.use(requireAuth, requireTenantAccess);
 
-// ✅ import the middleware you actually export
-const { auth: requireAuth } = require('../../middleware/auth');
-// ✅ mount ONCE for the whole router (not inside handlers)
-router.use(requireAuth);
+function tenantFilter(req, extra = {}) {
+  return { tenantId: req.tenantId, ...extra };
+}
+
+function tenantIdFilter(req, id) {
+  return { _id: id, tenantId: req.tenantId };
+}
 
 function getMyId(req) {
   return String(
@@ -158,14 +221,199 @@ function getMyId(req) {
     req.userDoc?._id ||
     req.userDoc?.id ||
     ''
-  );
+  ).trim();
+}
+
+function getMyEmail(req) {
+  return String(
+    req.userDoc?.email ||
+    req.user?.email ||
+    ''
+  )
+    .trim()
+    .toLowerCase();
+}
+
+function customerInvoiceVisibilityOr(req) {
+  const myId = getMyId(req);
+  const myEmail = getMyEmail(req);
+
+  return [
+    myId ? { customerId: myId } : null,
+    myEmail ? { customerEmail: myEmail } : null,
+  ].filter(Boolean);
+}
+
+function customerPaymentVisibilityOr(req) {
+  const myId = getMyId(req);
+  const myEmail = getMyEmail(req);
+
+  return [
+    myId ? { userId: myId } : null,
+    myEmail ? { customerEmail: myEmail } : null,
+  ].filter(Boolean);
+}
+
+function lineFromPayment(payment = {}) {
+  const cart = payment.cart || {};
+  const amount = Number(payment.amount || payment.gross || 0);
+
+  const label =
+    cart?.property?.serviceRequestLabel ||
+    cart?.property?.serviceType ||
+    cart?.planName ||
+    'AI Cleaning Service';
+
+  return {
+    sku: 'SERVICE-CLEANING',
+    description: String(label).replace(/[_-]+/g, ' '),
+    qty: 1,
+    unitPrice: amount,
+    amount,
+  };
+}
+
+async function backfillPaidInvoicesForCapturedPayments(req, opts = {}) {
+  const role = (req.userDoc?.role || req.user?.role || '').toLowerCase();
+  const myId = getMyId(req);
+  const myEmail = getMyEmail(req);
+
+  const pq = {
+    tenantId: req.tenantId,
+    status: 'captured',
+  };
+
+  if (role !== 'admin' && role !== 'ops') {
+    const ownership = customerPaymentVisibilityOr(req);
+    if (!ownership.length) return 0;
+    pq.$or = ownership;
+  } else if (opts.customerId) {
+    pq.userId = opts.customerId;
+  }
+
+  if (opts.propertyId) {
+    const propertyOr = [
+      { propertyId: opts.propertyId },
+      { 'cart.propertyId': opts.propertyId },
+      { 'cart.propertyMongoId': opts.propertyId },
+    ];
+
+    if (pq.$or) {
+      pq.$and = [{ $or: pq.$or }, { $or: propertyOr }];
+      delete pq.$or;
+    } else {
+      pq.$or = propertyOr;
+    }
+  }
+
+  const payments = await Payment.find(pq)
+    .sort({ createdAt: -1 })
+    .limit(25)
+    .lean();
+
+  let created = 0;
+
+  for (const payment of payments) {
+    const existing = await Invoice.findOne({
+      tenantId: req.tenantId,
+      payments: payment._id,
+    }).lean();
+
+    if (existing) {
+      const patch = {};
+
+      if (!existing.customerId && (payment.userId || myId)) {
+        patch.customerId = String(payment.userId || myId);
+      }
+
+      if (!existing.customerEmail && (payment.customerEmail || myEmail)) {
+        patch.customerEmail = String(payment.customerEmail || myEmail).toLowerCase();
+      }
+
+      if (!Array.isArray(existing.lineItems) || !existing.lineItems.length) {
+        const lines =
+          Array.isArray(existing.lines) && existing.lines.length
+            ? existing.lines
+            : [lineFromPayment(payment)];
+
+        patch.lineItems = lines;
+      }
+
+      if (Object.keys(patch).length) {
+        await Invoice.updateOne(
+          { _id: existing._id, tenantId: req.tenantId },
+          { $set: patch }
+        );
+      }
+
+      if (!payment.invoice) {
+        await Payment.updateOne(
+          { _id: payment._id, tenantId: req.tenantId },
+          { $set: { invoice: existing._id } }
+        );
+      }
+
+      continue;
+    }
+
+    const amount = Number(payment.amount || payment.gross || 0);
+    const line = lineFromPayment(payment);
+
+    const propertyId = String(
+      payment?.cart?.propertyMongoId ||
+      payment?.propertyId ||
+      ''
+    ).trim();
+
+    const customerId = String(payment.userId || myId || '').trim();
+
+    const customerEmail = String(
+      payment.customerEmail ||
+      myEmail ||
+      payment?.cart?.customerEmail ||
+      ''
+    )
+      .trim()
+      .toLowerCase();
+
+    const createdAt = payment.createdAt ? new Date(payment.createdAt) : new Date();
+
+    const inv = await new Invoice({
+      tenantId: req.tenantId,
+      customerId: customerId || undefined,
+      customerEmail: customerEmail || undefined,
+      propertyId: propertyId || undefined,
+      year: createdAt.getFullYear(),
+      profitChannel: payment.profitChannel || 'customer',
+
+      lines: [line],
+      lineItems: [line],
+
+      subtotal: amount,
+      tax: 0,
+      total: amount,
+      amountPaid: amount,
+      balanceDue: 0,
+      status: 'paid',
+      payments: [payment._id],
+    }).save();
+
+    await Payment.updateOne(
+      { _id: payment._id, tenantId: req.tenantId },
+      { $set: { invoice: inv._id } }
+    );
+
+    created += 1;
+  }
+
+  return created;
 }
 
 /* ----------------- LIST ----------------- */
 router.get('/', async (req, res, next) => {
   try {
     const { customerId, propertyId, month, year, limit = 50, skip = 0 } = req.query || {};
-    const q = {};
+    const q = { tenantId: req.tenantId };
 
     // ✅ Role + tenancy
     const role = (req.userDoc?.role || req.user?.role || '').toLowerCase();
@@ -173,24 +421,64 @@ router.get('/', async (req, res, next) => {
 
     // Default: restrict to current customer unless admin/ops
     if (role !== 'admin' && role !== 'ops') {
-      if (!myId) return res.status(401).json({ ok: false, error: 'unauthorized' });
-      q.customerId = myId;
+      const ownership = customerInvoiceVisibilityOr(req);
+
+      if (!ownership.length) {
+        return res.status(401).json({ ok: false, error: 'unauthorized' });
+      }
+
+      q.$or = ownership;
     } else {
-      // admins/ops: optional filters
       if (customerId) q.customerId = customerId;
     }
 
     if (propertyId) q.propertyId = propertyId;
     if (month || year) {
       if (month) q['period.month'] = Number(month);
-      if (year)  q['period.year']  = Number(year);
+      if (year) q['period.year'] = Number(year);
     }
+
+    await backfillPaidInvoicesForCapturedPayments(req, {
+      customerId,
+      propertyId,
+    });
 
     const rows = await Invoice.find(q)
       .sort({ createdAt: -1 })
       .skip(Number(skip))
       .limit(Number(limit))
       .lean();
+
+    if (role !== 'admin' && role !== 'ops' && myId && getMyEmail(req)) {
+      const myEmail = getMyEmail(req);
+
+      const idsToPatch = rows
+        .filter((inv) => {
+          return (
+            !String(inv.customerId || '').trim() &&
+            String(inv.customerEmail || '').toLowerCase() === myEmail
+          );
+        })
+        .map((inv) => inv._id);
+
+      if (idsToPatch.length) {
+        await Invoice.updateMany(
+          {
+            tenantId: req.tenantId,
+            _id: { $in: idsToPatch },
+          },
+          {
+            $set: { customerId: myId },
+          }
+        );
+
+        rows.forEach((inv) => {
+          if (idsToPatch.some((id) => String(id) === String(inv._id))) {
+            inv.customerId = myId;
+          }
+        });
+      }
+    }
 
     res.json({ ok: true, data: rows });
   } catch (e) { next(e); }
@@ -209,15 +497,21 @@ router.post('/', async (req, res, next) => {
     const subtotal = lines.reduce((s, l) => s + (Number(l.amount ?? (l.qty || 1) * (l.unitPrice || 0)) || 0), 0);
     const total = Number((subtotal + Number(tax || 0)).toFixed(2));
 
-    const doc = await (new Invoice({
-      customerId, propertyId,
-      lines,
-      subtotal, tax, total,
-      pdfUrl,
-      payments,
-      period: period || undefined,
-      status: 'paid', // if linked to successful payment; else 'issued'
-    })).save();
+    const doc = await (
+      new Invoice({
+        tenantId: req.tenantId,
+        customerId,
+        propertyId,
+        lines,
+        subtotal,
+        tax,
+        total,
+        pdfUrl,
+        payments,
+        period: period || undefined,
+        status: "paid",
+      })
+    ).save();
 
     res.json({ ok: true, data: doc });
   } catch (e) { next(e); }
@@ -244,7 +538,8 @@ router.get('/generate-monthly', async (req, res, next) => {
     const end = new Date(Date.UTC(y, m, 1, 0, 0, 0)); // exclusive
 
     const pq = {
-      status: 'captured',
+      tenantId: req.tenantId,
+      status: "captured",
       createdAt: { $gte: start, $lt: end },
     };
     if (customerId) pq.userId = customerId;
@@ -270,10 +565,11 @@ router.get('/generate-monthly', async (req, res, next) => {
       const sum = Number(arr.reduce((s, x) => s + Number(x.amount || 0), 0).toFixed(2));
 
       const qExist = {
-        customerId: uid === 'NA' ? undefined : uid,
-        propertyId: pid === 'NA' ? undefined : pid,
-        'period.month': m,
-        'period.year': y,
+        tenantId: req.tenantId,
+        customerId: uid === "NA" ? undefined : uid,
+        propertyId: pid === "NA" ? undefined : pid,
+        "period.month": m,
+        "period.year": y,
       };
 
       // find existing invoice for this group+period
@@ -283,8 +579,8 @@ router.get('/generate-monthly', async (req, res, next) => {
         if (mode === 'createOnly') continue; // keep old behavior (skip)
 
         // Recompute to a single monthly line and replace totals + payments set
-        const newDoc = await Invoice.findByIdAndUpdate(
-          existing._id,
+        const newDoc = await Invoice.findOneAndUpdate(
+          { _id: existing._id, tenantId: req.tenantId },
           {
             $set: {
               lines: [{
@@ -306,23 +602,28 @@ router.get('/generate-monthly', async (req, res, next) => {
         ).lean();
         updated++;
       } else {
-        await (new Invoice({
-          customerId: uid === 'NA' ? undefined : uid,
-          propertyId: pid === 'NA' ? undefined : pid,
-          period: { month: m, year: y },
-          lines: [{
-            sku: 'SERVICE-MONTHLY',
-            description: `Monthly services for ${m}/${y}`,
-            qty: 1,
-            unitPrice: sum,
-            amount: sum,
-          }],
-          subtotal: sum,
-          tax: 0,
-          total: sum,
-          status: 'paid',
-          payments,
-        })).save();
+        await (
+          new Invoice({
+            tenantId: req.tenantId,
+            customerId: uid === "NA" ? undefined : uid,
+            propertyId: pid === "NA" ? undefined : pid,
+            period: { month: m, year: y },
+            lines: [
+              {
+                sku: "SERVICE-MONTHLY",
+                description: `Monthly services for ${m}/${y}`,
+                qty: 1,
+                unitPrice: sum,
+                amount: sum,
+              },
+            ],
+            subtotal: sum,
+            tax: 0,
+            total: sum,
+            status: "paid",
+            payments,
+          })
+        ).save();
         created++;
       }
     }
@@ -349,7 +650,11 @@ router.patch('/:id', async (req, res, next) => {
     if (status && ['issued', 'paid', 'void'].includes(status)) $set.status = status;
     if (!Object.keys($set).length) return res.status(400).json({ ok: false, error: 'nothing to update' });
 
-    const doc = await Invoice.findByIdAndUpdate(id, { $set }, { new: true }).lean();
+    const doc = await Invoice.findOneAndUpdate(
+      tenantIdFilter(req, id),
+      { $set },
+      { new: true }
+    ).lean();
     if (!doc) return res.status(404).json({ ok: false, error: 'invoice not found' });
 
     res.json({ ok: true, data: doc });
@@ -372,7 +677,7 @@ router.delete('/:id', async (req, res, next) => {
     //   return res.status(403).json({ ok: false, error: 'forbidden' });
     // }
 
-    const inv = await Invoice.findById(id);
+    const inv = await Invoice.findOne(tenantIdFilter(req, id));
     if (!inv) {
       return res
         .status(404)
@@ -410,7 +715,8 @@ router.get('/:id/pdf', async (req, res, next) => {
     const { id } = req.params;
     const { download = '0' } = req.query;
 
-    const inv = await Invoice.findById(id).lean();
+
+
     if (!inv || !inv.pdfUrl) {
       return res.status(404).json({ ok: false, error: 'PDF_NOT_SET' });
     }
@@ -481,7 +787,7 @@ router.get('/:id/pdf-signed', async (req, res, next) => {
     const { id } = req.params;
     const { download = '0', debug = '0' } = req.query;
 
-    const inv = await Invoice.findById(id).lean();
+    const inv = await Invoice.findOne(tenantIdFilter(req, id)).lean();
     if (!inv || !inv.pdfUrl) return res.status(404).json({ ok: false, error: 'PDF_NOT_SET' });
 
     // Parse publicId + guessed resourceType from stored URL
@@ -533,7 +839,7 @@ router.get('/:id/pdf-signed', async (req, res, next) => {
       }
     }
 
-    if (debug === '1') {
+    if (debug === '1' && process.env.NODE_ENV !== 'production') {
       return res.json({
         ok: !!chosen,
         parsed,

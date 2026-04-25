@@ -53,9 +53,9 @@ function isPeakHour(h) {
 const CAPACITY_MIN_PER_DAY = Number(process.env.CEO_CAPACITY_MIN_PER_DAY || 720);
 const LABOR_RATE_DEFAULT = Number(process.env.CEO_LABOR_RATE_DEFAULT || 25); // $/hr
 
-async function sumPayments(range) {
+async function sumPayments(range, tenantId) {
     const { start, end } = rangeToDates(range);
-    const match = { createdAt: { $gte: start, $lte: end } };
+    const match = { tenantId, createdAt: { $gte: start, $lte: end } };
     const byStatus = await Payment.aggregate([
         { $match: match },
         { $group: { _id: '$status', count: { $sum: 1 }, amount: { $sum: '$amount' } } }
@@ -80,21 +80,29 @@ async function sumPayments(range) {
     };
 }
 
-async function jobsOverview(range) {
+async function jobsOverview(range, tenantId) {
     const { start, end } = rangeToDates(range);
     // Jobs "created" in range
-    const created = await Job.countDocuments({ createdAt: { $gte: start, $lte: end } }).lean();
+    const created = await Job.countDocuments({
+        tenantId,
+        createdAt: { $gte: start, $lte: end },
+    });
     // Jobs scheduled in range (by main date)
-    const scheduled = await Job.countDocuments({ date: { $gte: start, $lte: end } }).lean();
+    const scheduled = await Job.countDocuments({
+        tenantId,
+        date: { $gte: start, $lte: end },
+    });
     // Completed in range (by updatedAt) – tweak to your schema if you store completedAt
     const completed = await Job.countDocuments({
-        status: 'completed',
-        updatedAt: { $gte: start, $lte: end }
-    }).lean();
+        tenantId,
+        status: "completed",
+        updatedAt: { $gte: start, $lte: end },
+    });
 
     // status counts (all-time quick snapshot)
     const statusAgg = await Job.aggregate([
-        { $group: { _id: '$status', count: { $sum: 1 } } }
+        { $match: { tenantId } },
+        { $group: { _id: "$status", count: { $sum: 1 } } },
     ]);
     const statusCounts = statusAgg.reduce((m, r) => (m[r._id || 'unknown'] = r.count, m), {});
 
@@ -116,8 +124,8 @@ router.get('/overview', async (req, res, next) => {
     try {
         const range = (req.query.range || 'MTD').toUpperCase();
         const [pay, jobs, lowStock] = await Promise.all([
-            sumPayments(range),
-            jobsOverview(range),
+            sumPayments(range, req.tenantId),
+            jobsOverview(range, req.tenantId),
             lowStockCount()
         ]);
 
@@ -143,7 +151,10 @@ router.get('/bookings-week', async (req, res, next) => {
         const end = new Date(start);
         end.setDate(end.getDate() + 7);
 
-        const jobs = await Job.find({ date: { $gte: start, $lte: end } })
+        const jobs = await Job.find({
+  tenantId: req.tenantId,
+  date: { $gte: start, $lte: end },
+})
             .select({ date: 1, window: 1, durationMinutes: 1 })
             .lean();
 
@@ -254,13 +265,16 @@ router.get('/pnl', async (req, res, next) => {
 
         // Revenue
         const revAgg = await Payment.aggregate([
-            { $match: { status: 'captured', createdAt: { $gte: start, $lte: end } } },
+            { $match: { tenantId: req.tenantId, status: 'captured', createdAt: { $gte: start, $lte: end } } },
             { $group: { _id: null, sum: { $sum: '$amount' } } }
         ]);
         const revenue = Number((revAgg[0]?.sum || 0).toFixed(2));
 
         // Labor cost
-        const jobs = await Job.find({ date: { $gte: start, $lte: end } })
+        const jobs = await Job.find({
+  tenantId: req.tenantId,
+  date: { $gte: start, $lte: end },
+})
             .select({ durationMinutes: 1, property: 1 })
             .lean();
 

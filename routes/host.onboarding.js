@@ -16,28 +16,29 @@ const Sku = require("../models/Sku");
 
 // Server-trusted catalog (price & names)
 const SKU = {
-  shampoo:            { skuId: "SH-REFILL", name: "Shampoo (refill)",       price: 4.5 },
-  conditioner:        { skuId: "CD-REFILL", name: "Conditioner (refill)",    price: 4.5 },
-  body_wash:          { skuId: "BW-BOTTLE", name: "Body wash",               price: 4.0 },
-  hand_soap:          { skuId: "HS-BOTTLE", name: "Hand soap",               price: 3.0 },
-  dish_soap:          { skuId: "DS-BOTTLE", name: "Dish soap",               price: 3.5 },
-  toilet_paper:       { skuId: "TP-ROLL",   name: "Toilet paper",            price: 0.6 },
-  paper_towels:       { skuId: "PT-ROLL",   name: "Paper towels",            price: 1.2 },
-  trash_liners:       { skuId: "TL-PACK",   name: "Trash liners",            price: 2.8 },
-  laundry_detergent:  { skuId: "LD-BOTTLE", name: "Laundry detergent",       price: 6.0 },
-  coffee_pods:        { skuId: "CP-BOX12",  name: "Coffee pods (12)",        price: 6.5 },
-  tea_bags:           { skuId: "TB-BOX25",  name: "Tea bags (25)",           price: 3.2 },
-  tv:                 { skuId: "TV-43",     name: "Smart TV",                price: 15 },
-  microwave:          { skuId: "MW-STD",    name: "Microwave",               price: 8 },
-  vacuum:             { skuId: "VC-STD",    name: "Vacuum cleaner",          price: 12 },
-  washing_machine:    { skuId: "WM-STD",    name: "Washing machine",         price: 30 },
-  iron:               { skuId: "IR-SET",    name: "Iron + board",            price: 4 },
-  spoon_set:          { skuId: "SP-SET6",   name: "Spoon set (6)",           price: 3 },
-  cutlery_set:        { skuId: "CT-SET24",  name: "Cutlery set (24)",        price: 6 },
-  dinnerware:         { skuId: "DW-SET4",   name: "Dinnerware (4)",          price: 7 },
-  bedsheets:          { skuId: "BS-SET",    name: "Bedsheet set",            price: 5 },
-  towels:             { skuId: "TW-SET4",   name: "Bath towel set (4)",      price: 6 },
+  shampoo: { skuId: "SH-REFILL", name: "Shampoo (refill)", price: 4.5 },
+  conditioner: { skuId: "CD-REFILL", name: "Conditioner (refill)", price: 4.5 },
+  body_wash: { skuId: "BW-BOTTLE", name: "Body wash", price: 4.0 },
+  hand_soap: { skuId: "HS-BOTTLE", name: "Hand soap", price: 3.0 },
+  dish_soap: { skuId: "DS-BOTTLE", name: "Dish soap", price: 3.5 },
+  toilet_paper: { skuId: "TP-ROLL", name: "Toilet paper", price: 0.6 },
+  paper_towels: { skuId: "PT-ROLL", name: "Paper towels", price: 1.2 },
+  trash_liners: { skuId: "TL-PACK", name: "Trash liners", price: 2.8 },
+  laundry_detergent: { skuId: "LD-BOTTLE", name: "Laundry detergent", price: 6.0 },
+  coffee_pods: { skuId: "CP-BOX12", name: "Coffee pods (12)", price: 6.5 },
+  tea_bags: { skuId: "TB-BOX25", name: "Tea bags (25)", price: 3.2 },
+  tv: { skuId: "TV-43", name: "Smart TV", price: 15 },
+  microwave: { skuId: "MW-STD", name: "Microwave", price: 8 },
+  vacuum: { skuId: "VC-STD", name: "Vacuum cleaner", price: 12 },
+  washing_machine: { skuId: "WM-STD", name: "Washing machine", price: 30 },
+  iron: { skuId: "IR-SET", name: "Iron + board", price: 4 },
+  spoon_set: { skuId: "SP-SET6", name: "Spoon set (6)", price: 3 },
+  cutlery_set: { skuId: "CT-SET24", name: "Cutlery set (24)", price: 6 },
+  dinnerware: { skuId: "DW-SET4", name: "Dinnerware (4)", price: 7 },
+  bedsheets: { skuId: "BS-SET", name: "Bedsheet set", price: 5 },
+  towels: { skuId: "TW-SET4", name: "Bath towel set (4)", price: 6 },
 };
+
 
 // POST /api/host/onboarding/submit
 router.post("/onboarding/submit", async (req, res, next) => {
@@ -50,20 +51,37 @@ router.post("/onboarding/submit", async (req, res, next) => {
       inventory: legacyInv, // { choice, plan }
     } = req.body || {};
 
+    const tenantId = String(
+      req.tenantId ||
+      req.body?.tenantId ||
+      req.query?.tenantId ||
+      req.headers["x-tenant-id"] ||
+      ""
+    ).trim();
+
+    if (!tenantId) {
+      return res.status(400).json({
+        ok: false,
+        error: "tenant_required",
+        message: "Tenant session missing. Please sign in and select a workspace first.",
+      });
+    }
+
     if (!property) {
       return res.status(400).json({ ok: false, error: "Invalid payload: property missing" });
     }
 
-    const inventoryPlan   = planBody || legacyInv?.plan || null;
+    const inventoryPlan = planBody || legacyInv?.plan || null;
     const inventoryChoice = choiceBody || legacyInv?.choice || "none";
 
     // 1) Upsert Property
     const key = property.externalRef
-      ? { externalRef: property.externalRef }
-      : { address: property.address, zip: property.zip };
+      ? { tenantId, externalRef: property.externalRef }
+      : { tenantId, address: property.address || "", zip: property.zip || "" };
 
     const toNumber = (x) => (x === undefined || x === null || x === "" ? 0 : Number(x));
     const normalized = {
+      tenantId,
       propertyId: property?.propertyId || property?.externalRef || undefined,
       name: property?.name || (property?.address ? property.address.split(",")[0] : "Short-term rental"),
       address: property?.address || "",
@@ -105,17 +123,17 @@ router.post("/onboarding/submit", async (req, res, next) => {
     }
 
     // 3) Inventory → normalize + expected weight
-    const SKU_BY_ID  = SKU;
+    const SKU_BY_ID = SKU;
     const SKU_BY_SKU = Object.fromEntries(Object.values(SKU).map((x) => [x.skuId, x]));
-    const rawItems   = Array.isArray(inventoryPlan?.items) ? inventoryPlan.items : [];
+    const rawItems = Array.isArray(inventoryPlan?.items) ? inventoryPlan.items : [];
 
     const mapped = rawItems.map((it) => {
-      const qty     = Math.max(0, Number(it?.qty || 0));
-      const keyId   = it?.id || it?.skuId || "";
-      const meta    = SKU_BY_ID[keyId] || SKU_BY_SKU[keyId];
-      const price   = meta ? Number(meta.price) : 0;
-      const skuId   = meta?.skuId || keyId;
-      const name    = meta?.name || it?.name || keyId;
+      const qty = Math.max(0, Number(it?.qty || 0));
+      const keyId = it?.id || it?.skuId || "";
+      const meta = SKU_BY_ID[keyId] || SKU_BY_SKU[keyId];
+      const price = meta ? Number(meta.price) : 0;
+      const skuId = meta?.skuId || keyId;
+      const name = meta?.name || it?.name || keyId;
       return { skuId, name, qty, unitPrice: price, contract: !!it?.contract };
     });
 

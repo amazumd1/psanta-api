@@ -4,7 +4,7 @@ const crypto = require('crypto');
 const express = require('express');
 const router = express.Router();
 const fetch = require('node-fetch'); // built-in in Node18+, else add dep
-const { paypalClient } = require('../../services/paypal');
+const { paypalClient, normalizePayPalEnv } = require('../../services/paypal');
 const paypalSdk = require('@paypal/checkout-server-sdk');
 const Payment = require('../../models/Payment');
 const jwt = require('jsonwebtoken');
@@ -13,10 +13,31 @@ const Event = require('../../models/Event');
 const Invoice = require('../../models/Invoice');
 const Property = require('../../models/Property');
 const WarehouseOrder = require('../../models/WarehouseOrder'); // ✅ add
+const Task = require('../../models/Task');
 const Order = require('../../../models/Order');
 const { auth } = require('../../../middleware/auth'); // top of file
 const Counter = require('../../models/Counter');
+const { requireRole } = require('../../../middleware/roles');
 const mongoose = require('mongoose');
+const { getFirestore, serverTimestamp } = require('../../../lib/firebaseAdminApp');
+function resolveTenantId(req) {
+  return String(
+    req.tenantId ||
+    req.body?.tenantId ||
+    req.query?.tenantId ||
+    req.headers["x-tenant-id"] ||
+    ""
+  ).trim();
+}
+
+function requireNonProdDebug(req, res, next) {
+  if (process.env.NODE_ENV === "production") {
+    return res.status(404).json({ ok: false, error: "Not found" });
+  }
+  return next();
+}
+
+router.use("/__debug", requireNonProdDebug);
 
 const OPS_BASE_URL = process.env.OPS_BASE_URL || 'https://psanta-ops.vercel.app';
 
@@ -25,7 +46,7 @@ const OPS_BASE_URL = process.env.OPS_BASE_URL || 'https://psanta-ops.vercel.app'
 const PORTAL_JWT_TTL = process.env.CP_JWT_TTL || '7d';              // e.g. '7d'
 const PORTAL_JWT_TTL_MS =
   Number(process.env.CP_JWT_TTL_MS || 7 * 24 * 60 * 60 * 1000);      // 7d in ms
-const PORTAL_BASE_URL = process.env.PORTAL_BASE_URL || 'http://localhost:3000';
+const PORTAL_BASE_URL = process.env.PORTAL_BASE_URL || process.env.FRONTEND_APP_URL || 'http://localhost:3004';
 
 
 
@@ -73,74 +94,407 @@ function makeQuoteHash(obj) {
 }
 
 // ---- Ensure/merge a customer property (non-destructive) ----
-async function ensureCustomerProperty(userId, bizId, prop = {}) {
-  let p = await Property.findOne({ propertyId: bizId, customer: userId }).lean();
-  if (p) {
+
+function cleanBizId(value, fallback = "PROPERTY") {
+  const raw = String(value || fallback).trim() || fallback;
+  return raw
+    .replace(/[^a-zA-Z0-9_-]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 56) || fallback;
+}
+
+function normalizePropertySnapshot(prop = {}) {
+  const out = { ...(prop || {}) };
+  if (!out.squareFootage && out.sqft) out.squareFootage = out.sqft;
+  if (!out.name && out.address) {
+    out.name = String(out.address).split("\n")[0].split(",")[0].trim();
+  }
+  if (out.address && (!out.city || !out.state || !out.zip)) {
+    try {
+      const line = String(out.address).split("\n")[0];
+      const parts = line.split(",").map((x) => x.trim());
+      if (!out.city && parts[1]) out.city = parts[1];
+      if (parts[2]) {
+        const tokens = parts[2].split(/\s+/).filter(Boolean);
+        if (!out.state && tokens[0]) out.state = tokens[0];
+        if (!out.zip && tokens[1]) out.zip = tokens.slice(1).join(" ");
+      }
+    } catch (_) { }
+  }
+  return out;
+}
+
+function scopedPropertyId(baseId, userId) {
+  const base = cleanBizId(baseId, "PROPERTY");
+  const suffix = String(userId || "").slice(-6) || crypto.randomBytes(3).toString("hex");
+  if (base.endsWith(`-${suffix}`)) return base;
+  return `${base}-${suffix}`.slice(0, 64);
+}
+
+async function ensureCustomerProperty(tenantId, userId, bizId, prop = {}) {
+  const normalized = normalizePropertySnapshot(prop);
+  const requestedBizId = cleanBizId(bizId || normalized.propertyId || normalized.address || "PROPERTY");
+
+  const buildUpdate = (existing = {}) => {
     const upd = {};
-    if (!p.name || p.name === 'My Property') upd.name = prop.name || 'My Property';
-    if (!p.address && prop.address) upd.address = prop.address;
-    if (!p.city && prop.city) upd.city = prop.city;
-    if (!p.state && prop.state) upd.state = prop.state;
-    if (!p.zip && prop.zip) upd.zip = prop.zip;
-    // if ((!p.squareFootage || p.squareFootage === 1200) && Number(prop.squareFootage) > 0) {
-    //   upd.squareFootage = Number(prop.squareFootage);
-    // }
-    const _sf = (prop && (prop.squareFootage ?? prop.sqft));
-    if ((!p.squareFootage || p.squareFootage === 1200) && Number(_sf) > 0) {
-      upd.squareFootage = Number(_sf);
-    }
+    if ((!existing.name || existing.name === "My Property") && normalized.name) upd.name = normalized.name;
+    if (normalized.address) upd.address = normalized.address;
+    if (normalized.city) upd.city = normalized.city;
+    if (normalized.state) upd.state = normalized.state;
+    if (normalized.zip) upd.zip = normalized.zip;
+    if (normalized.type) upd.type = normalized.type;
 
-    const cyc = prop.cycle || prop.cleaningCycle;
-    if (!p.cycle && cyc) upd.cycle = cyc;
-    if (p.isActive === false) upd.isActive = true;
+    const sf = normalized.squareFootage ?? normalized.sqft;
+    if (Number(sf) > 0) upd.squareFootage = Number(sf);
 
+    const cyc = normalized.cycle || normalized.cleaningCycle;
+    if (cyc) upd.cycle = cyc;
+
+    upd.customer = userId;
+    upd.isActive = true;
+    return upd;
+  };
+
+  let p = await Property.findOne({ tenantId, propertyId: requestedBizId, customer: userId }).lean();
+  if (p) {
+    const upd = buildUpdate(p);
     if (Object.keys(upd).length) {
-      await Property.updateOne({ _id: p._id }, { $set: upd });
+      await Property.updateOne({ _id: p._id, tenantId, customer: userId }, { $set: upd });
+      p = { ...p, ...upd };
+    }
+    return p;
+  }
+
+  const existingSameBiz = await Property.findOne({ tenantId, propertyId: requestedBizId }).lean();
+  const finalBizId =
+    existingSameBiz && String(existingSameBiz.customer || "") !== String(userId)
+      ? scopedPropertyId(requestedBizId, userId)
+      : requestedBizId;
+
+  p = await Property.findOne({ tenantId, propertyId: finalBizId, customer: userId }).lean();
+  if (p) {
+    const upd = buildUpdate(p);
+    if (Object.keys(upd).length) {
+      await Property.updateOne({ _id: p._id, tenantId, customer: userId }, { $set: upd });
       p = { ...p, ...upd };
     }
     return p;
   }
 
   const base = {
-    propertyId: bizId,
-    name: prop.name || 'My Property',
-    address: prop.address || '',
-    city: prop.city || '',
-    state: prop.state || '',
-    zip: prop.zip || '',
-    type: prop.type || 'house',
-    // squareFootage: Number(prop.squareFootage || 1200),
-    squareFootage: Number((prop && (prop.squareFootage ?? prop.sqft)) || 1200),
-    cycle: prop.cycle || prop.cleaningCycle || 'monthly',
+    tenantId,
+    propertyId: finalBizId,
+    name: normalized.name || "My Property",
+    address: normalized.address || "",
+    city: normalized.city || "",
+    state: normalized.state || "",
+    zip: normalized.zip || "",
+    type: normalized.type || "house",
+    squareFootage: Number((normalized.squareFootage ?? normalized.sqft) || 1200),
+    cycle: normalized.cycle || normalized.cleaningCycle || "monthly",
     customer: userId,
     isActive: true,
+    roomTasks: Array.isArray(normalized.roomTasks) ? normalized.roomTasks : [],
   };
 
   try {
-    const created = await (new Property(base)).save();
+    const created = await new Property(base).save();
     return created.toObject();
   } catch (e) {
-    if (e?.code === 11000 && e.keyPattern?.propertyId) {
-      const alt = `${bizId}-${String(userId).slice(-4)}`;
-      const dup = await (new Property({ ...base, propertyId: alt })).save();
-      return dup.toObject();
+    if (e?.code === 11000) {
+      const alt = scopedPropertyId(requestedBizId, `${userId}-${Date.now().toString(36)}`);
+      const created = await new Property({ ...base, propertyId: alt }).save();
+      return created.toObject();
     }
     throw e;
   }
 }
 
+function buildTaskRequirementsFromCart(cart = {}) {
+  const property = cart?.property || {};
+  const service = property.serviceType || property.serviceRequestLabel || cart?.planName || "AI cleaning";
 
+  const addOns = Array.isArray(property.addonsArray)
+    ? property.addonsArray
+    : Object.entries(property.addons || {})
+      .filter(([, enabled]) => Boolean(enabled))
+      .map(([key]) => key);
 
+  const tasks = [
+    { description: `Complete ${String(service).replace(/[_-]+/g, " ")} service` },
+    { description: "Capture before/after photos and notes" },
+  ];
+
+  if (property.condition) {
+    tasks.push({ description: `Handle condition: ${String(property.condition).replace(/[_-]+/g, " ")}` });
+  }
+
+  if (addOns.length) {
+    tasks.push({ description: `Add-ons: ${addOns.join(", ")}` });
+  }
+
+  if (property.maintenanceLabel || property.maintenancePackage) {
+    tasks.push({ description: `Maintenance: ${property.maintenanceLabel || property.maintenancePackage}` });
+  }
+
+  return [{ roomType: "Cleaning visit", tasks, isCompleted: false }];
+}
+
+async function ensureTasksForJobs({ tenantId, userId, propertyMongoId, jobs = [], cart = {} }) {
+  if (!tenantId || !userId || !propertyMongoId || !Array.isArray(jobs) || !jobs.length) return 0;
+
+  const requirements = buildTaskRequirementsFromCart(cart);
+  let created = 0;
+
+  for (const job of jobs) {
+    const jobId = String(job?.jobId || job?._id || "").trim();
+    if (!jobId) continue;
+
+    const exists = await Task.exists({ tenantId, jobId });
+    if (exists) continue;
+
+    await new Task({
+      tenantId,
+      propertyId: String(propertyMongoId),
+      jobId,
+      requirements,
+      specialRequirement: cart?.property?.serviceRequestLabel || cart?.property?.flow || "AI cleaning booking",
+      scheduledTime: job?.date || job?.window?.start || undefined,
+      status: "pending",
+      isActive: true,
+      chatHistory: [{
+        sender: "system",
+        type: "system",
+        message: "Task created automatically after payment capture.",
+        data: {
+          paymentId: String(job?.paymentId || ""),
+          orderId: String(job?.orderId || ""),
+          source: "paypal_capture",
+        },
+      }],
+    }).save();
+
+    created += 1;
+  }
+
+  return created;
+}
+
+async function ensureCustomerTenantAccessContext(userDoc, tenantId) {
+  if (!userDoc?._id || !tenantId) return userDoc;
+
+  const safeTenantId = String(tenantId || '').trim();
+  const existingActive = Array.isArray(userDoc.activeTenantIds) ? userDoc.activeTenantIds : [];
+  const nextActiveTenantIds = Array.from(new Set([...existingActive.map((x) => String(x || '').trim()).filter(Boolean), safeTenantId]));
+
+  let changed = false;
+  if (String(userDoc.defaultTenantId || '').trim() !== safeTenantId) {
+    userDoc.defaultTenantId = safeTenantId;
+    changed = true;
+  }
+  if (nextActiveTenantIds.join('|') !== existingActive.map((x) => String(x || '').trim()).filter(Boolean).join('|')) {
+    userDoc.activeTenantIds = nextActiveTenantIds;
+    changed = true;
+  }
+  if (changed && typeof userDoc.save === 'function') {
+    await userDoc.save();
+  }
+
+  try {
+    const db = getFirestore();
+    const actorUid = String(userDoc.firebaseUid || '').trim() || `legacy:${String(userDoc._id)}`;
+    const displayName = String(userDoc.name || '').trim() || String(userDoc.email || '').split('@')[0] || 'Customer';
+    const tenantRef = db.collection('tenants').doc(safeTenantId);
+    const memberRef = tenantRef.collection('members').doc(actorUid);
+
+    await memberRef.set({
+      uid: actorUid,
+      firebaseUid: String(userDoc.firebaseUid || '').trim() || null,
+      email: String(userDoc.email || '').trim().toLowerCase() || null,
+      emailLower: String(userDoc.email || '').trim().toLowerCase() || null,
+      displayName,
+      role: 'viewer',
+      status: 'active',
+      userId: String(userDoc._id),
+      updatedAt: serverTimestamp(),
+      joinedAt: serverTimestamp(),
+    }, { merge: true });
+
+    await db.collection('users').doc(actorUid).set({
+      uid: actorUid,
+      firebaseUid: String(userDoc.firebaseUid || '').trim() || null,
+      email: String(userDoc.email || '').trim().toLowerCase() || null,
+      emailLower: String(userDoc.email || '').trim().toLowerCase() || null,
+      displayName,
+      defaultTenantId: safeTenantId,
+      activeTenantIds: nextActiveTenantIds,
+      updatedAt: serverTimestamp(),
+      createdAt: serverTimestamp(),
+    }, { merge: true });
+  } catch (e) {
+    console.warn('customer tenant context ensure failed:', e.message);
+  }
+
+  return userDoc;
+}
+
+function invoiceLineFromPayment(saved = {}, cart = {}) {
+  const amount = Number(saved?.amount || 0);
+
+  const label =
+    cart?.property?.serviceRequestLabel ||
+    cart?.property?.serviceType ||
+    cart?.planName ||
+    'AI Cleaning Service';
+
+  return {
+    sku: 'SERVICE-CLEANING',
+    description: String(label).replace(/[_-]+/g, ' '),
+    qty: 1,
+    unitPrice: amount,
+    amount,
+  };
+}
+
+async function ensurePaidInvoiceForPayment({
+  tenantId,
+  saved,
+  userDoc,
+  ensuredProp,
+  cart = {},
+}) {
+  if (!tenantId || !saved?._id) return null;
+
+  const paymentId = saved._id;
+  const amount = Number(saved?.amount || 0);
+
+  const customerId = String(saved?.userId || userDoc?._id || '').trim();
+
+  const customerEmail = String(
+    saved?.customerEmail ||
+    userDoc?.email ||
+    cart?.customerEmail ||
+    cart?.customer?.email ||
+    cart?.contact?.email ||
+    ''
+  )
+    .trim()
+    .toLowerCase();
+
+  const propertyMongoId = ensuredProp?._id
+    ? String(ensuredProp._id)
+    : String(cart?.propertyMongoId || '').trim();
+
+  const propertyId =
+    propertyMongoId ||
+    String(saved?.propertyId || cart?.propertyId || '').trim();
+
+  const line = invoiceLineFromPayment(saved, cart);
+
+  const year = saved?.createdAt
+    ? new Date(saved.createdAt).getFullYear()
+    : new Date().getFullYear();
+
+  let invoice = await Invoice.findOne({
+    tenantId,
+    payments: paymentId,
+  });
+
+  if (!invoice) {
+    invoice = await new Invoice({
+      tenantId,
+      customerId: customerId || undefined,
+      customerEmail: customerEmail || undefined,
+      customerName: String(userDoc?.name || '').trim() || undefined,
+      propertyId: propertyId || undefined,
+      year,
+      profitChannel: saved?.profitChannel || 'customer',
+
+      lines: [line],
+      lineItems: [line],
+
+      subtotal: amount,
+      tax: 0,
+      total: amount,
+      amountPaid: amount,
+      balanceDue: 0,
+      status: 'paid',
+      payments: [paymentId],
+    }).save();
+  } else {
+    const patch = {};
+
+    if (!invoice.customerId && customerId) patch.customerId = customerId;
+    if (!invoice.customerEmail && customerEmail) patch.customerEmail = customerEmail;
+    if (!invoice.customerName && userDoc?.name) patch.customerName = String(userDoc.name);
+    if (!invoice.propertyId && propertyId) patch.propertyId = propertyId;
+    if (!invoice.year) patch.year = year;
+    if (!invoice.profitChannel) patch.profitChannel = saved?.profitChannel || 'customer';
+
+    if (!Array.isArray(invoice.lines) || !invoice.lines.length) {
+      patch.lines = [line];
+    }
+
+    if (!Array.isArray(invoice.lineItems) || !invoice.lineItems.length) {
+      patch.lineItems = [line];
+    }
+
+    if (!Number(invoice.amountPaid)) patch.amountPaid = amount;
+
+    patch.balanceDue = 0;
+    patch.status = 'paid';
+
+    if (Object.keys(patch).length) {
+      invoice = await Invoice.findOneAndUpdate(
+        { _id: invoice._id, tenantId },
+        { $set: patch },
+        { new: true }
+      );
+    }
+  }
+
+  const paymentPatch = {
+    invoice: invoice._id,
+  };
+
+  if (customerId && String(saved.userId || '') !== customerId) {
+    paymentPatch.userId = customerId;
+  }
+
+  if (
+    customerEmail &&
+    String(saved.customerEmail || '').toLowerCase() !== customerEmail
+  ) {
+    paymentPatch.customerEmail = customerEmail;
+  }
+
+  await Payment.updateOne(
+    { _id: paymentId, tenantId },
+    { $set: paymentPatch }
+  );
+
+  return typeof invoice.toObject === 'function' ? invoice.toObject() : invoice;
+}
 
 /* ---------- Create One-Time Order ---------- */
-router.post('/create-order', async (req, res, next) => {
+router.post("/create-order", async (req, res, next) => {
   try {
+    const tenantId = resolveTenantId(req);
+    if (!tenantId) {
+      return res.status(400).json({
+        ok: false,
+        error: "tenant_required",
+        message: "Tenant session missing.",
+      });
+    }
+
     const {
       propertyId,
       userId,
       amountOverride,
-      profitChannel,      // 🔹 yahi se channel aa raha hai PaymentDrawer se
-      cart,               // optional, thoda clean code
+      profitChannel,
+      cart,
+      customerEmail,
     } = req.body || {};
     const { amount, reason } = await computeEstimatedMonthlyOnServer({ propertyId, amountOverride });
 
@@ -165,7 +519,7 @@ router.post('/create-order', async (req, res, next) => {
         shipping_preference: 'NO_SHIPPING',
         user_action: 'PAY_NOW',
         return_url: `${PORTAL_BASE_URL}/customer/after-pay`,
-        cancel_url: `${PORTAL_BASE_URL}/orders`,
+        cancel_url: `${PORTAL_BASE_URL}/cleaning`,
       },
 
     });
@@ -174,16 +528,24 @@ router.post('/create-order', async (req, res, next) => {
 
     const quoteHash = makeQuoteHash({ propertyId, amount });
     await Payment.create({
-      type: 'one_time',
+      tenantId,
+      type: "one_time",
       propertyId,
       userId,
-      currency: 'USD',
+      currency: "USD",
       amount,
+      customerEmail: String(
+        customerEmail ||
+        cart?.customerEmail ||
+        cart?.customer?.email ||
+        cart?.contact?.email ||
+        ''
+      ).trim().toLowerCase() || undefined,
       quoteHash,
       paypal: { orderId: createRes.result.id, rawCreateResponse: createRes.result },
       cart: req.body?.cart || null,
-      status: 'created',
-      profitChannel: profitChannel || 'customer',
+      status: "created",
+      profitChannel: profitChannel || "customer",
     });
 
     const approveUrl = (createRes.result.links || []).find(l => l.rel === 'approve')?.href;
@@ -193,8 +555,17 @@ router.post('/create-order', async (req, res, next) => {
 
 
 /* ---------- Capture Order ---------- */
-router.post('/capture-order', async (req, res) => {
+router.post("/capture-order", async (req, res) => {
   try {
+    const tenantId = resolveTenantId(req);
+    if (!tenantId) {
+      return res.status(400).json({
+        ok: false,
+        error: "tenant_required",
+        message: "Tenant session missing.",
+      });
+    }
+
     const { orderId } = req.body || {};
     if (!orderId) return res.status(400).json({ ok: false, error: 'orderId required' });
 
@@ -219,18 +590,32 @@ router.post('/capture-order', async (req, res) => {
     const currency = amountObj.currency_code || 'USD';
 
     // 🔁 LOAD existing payment WITHOUT .lean() so we can preserve cart
-    const payDoc = await Payment.findOne({ 'paypal.orderId': orderId }); // no .lean()
+    const payDoc = await Payment.findOne({
+      tenantId,
+      "paypal.orderId": orderId,
+    }); // no .lean()
     const cart = payDoc?.cart || req.body?.cart || {};
+    const claimedEmail = String(
+      payDoc?.customerEmail ||
+      req.body?.customerEmail ||
+      cart?.customerEmail ||
+      cart?.customer?.email ||
+      cart?.contact?.email ||
+      payerEmail ||
+      ''
+    ).trim().toLowerCase();
 
     // 🔧 Build base (preserving cart)
     const base = {
-      type: 'one_time',
+      tenantId,
+      type: "one_time",
       propertyId: payDoc?.propertyId || cart?.propertyId || undefined,
       userId: payDoc?.userId,
+      customerEmail: claimedEmail || payerEmail || undefined,
       amount: gross || payDoc?.amount || 0,
       currency,
-      status: status.toLowerCase() === 'completed' ? 'captured' : 'failed',
-      cart, // ✅ IMPORTANT: store it back
+      status: status.toLowerCase() === "completed" ? "captured" : "failed",
+      cart,
       paypal: {
         ...(payDoc?.paypal?.toObject?.() || payDoc?.paypal || {}),
         orderId,
@@ -249,6 +634,7 @@ router.post('/capture-order', async (req, res) => {
 
     // --- User linking (prefer existing → then by payer email) ---
     let userDoc = null;
+    let ensuredProp = null;
 
     const sessionUserId = req.user?.id || req.userId || null;
     if (sessionUserId || saved?.userId) {
@@ -256,32 +642,44 @@ router.post('/capture-order', async (req, res) => {
       try { userDoc = await User.findById(uid); } catch (_) { }
     }
 
-    if (!userDoc && payerEmail) {
-      userDoc = await User.findOne({ email: payerEmail });
+    if (!userDoc && claimedEmail) {
+      userDoc = await User.findOne({ email: claimedEmail });
       if (!userDoc) {
         const randomPwd = Math.random().toString(36).slice(2) + 'A1!';
         userDoc = await (new User({
           name: payerName || 'New Customer',
-          email: payerEmail,
+          email: claimedEmail,
           password: randomPwd,
           role: 'customer',
           isActive: true,
           mustSetPassword: true,
-
         })).save();
       }
     }
 
-    if (userDoc && (!saved.userId || saved.userId !== String(userDoc._id))) {
+    if (ensuredProp?._id) {
+      const canonicalBizId = String(ensuredProp.propertyId || bizPropId);
       saved = await Payment.findByIdAndUpdate(
         saved._id,
-        { $set: { userId: String(userDoc._id) } },
+        {
+          $set: {
+            propertyId: canonicalBizId,
+            "cart.propertyId": canonicalBizId,
+            "cart.propertyMongoId": String(ensuredProp._id),
+          },
+        },
         { new: true }
       );
+
+      cart.propertyId = canonicalBizId;
+      cart.propertyMongoId = String(ensuredProp._id);
+    }
+
+    if (userDoc) {
+      userDoc = await ensureCustomerTenantAccessContext(userDoc, tenantId);
     }
 
     // --- Ensure property + customer-facing Order ---
-    let ensuredProp = null;
 
     // ✅ ensure/merge property (minimal)
     try {
@@ -300,7 +698,12 @@ router.post('/capture-order', async (req, res) => {
             }
           } catch { }
         }
-        ensuredProp = await ensureCustomerProperty(String(userDoc._id), String(bizPropId), norm);
+        ensuredProp = await ensureCustomerProperty(
+          tenantId,
+          String(userDoc._id),
+          String(bizPropId),
+          norm
+        );
       }
     } catch (e) {
       console.warn('property ensure failed:', e.message);
@@ -333,9 +736,10 @@ router.post('/capture-order', async (req, res) => {
         })();
 
         ensuredProp = await ensureCustomerProperty(
+          tenantId,
           String(userDoc._id),
           String(bizPropId),
-          normalizedProp
+          norm
         );
 
         // Light non-destructive update from cart.property (overwrite only if given)
@@ -357,6 +761,29 @@ router.post('/capture-order', async (req, res) => {
           if (cyc) u.cycle = cyc;
           if (Object.keys(u).length) {
             await Property.updateOne({ _id: ensuredProp._id }, { $set: u });
+          }
+          if (ensuredProp?._id) {
+            const canonicalBizId = String(ensuredProp.propertyId || bizPropId);
+
+            const paymentPatch = {
+              userId: String(userDoc._id),
+              propertyId: canonicalBizId,
+              customerEmail:
+                claimedEmail ||
+                String(userDoc.email || '').trim().toLowerCase() ||
+                undefined,
+              'cart.propertyId': canonicalBizId,
+              'cart.propertyMongoId': String(ensuredProp._id),
+            };
+
+            saved = await Payment.findByIdAndUpdate(
+              saved._id,
+              { $set: paymentPatch },
+              { new: true }
+            );
+
+            cart.propertyId = canonicalBizId;
+            cart.propertyMongoId = String(ensuredProp._id);
           }
         }
 
@@ -500,38 +927,24 @@ router.post('/capture-order', async (req, res) => {
     // }
 
     // Create one paid invoice per Payment (idempotent)
+    // Create/update one paid invoice per Payment (idempotent)
+    let paidInvoice = null;
+
     try {
-      const lineAmt = Number(saved?.amount || 0);
-      const exists = await Invoice.findOne({ payments: saved._id }).lean();
-      if (!exists) {
-        // 🔹 Year capture karo (PlanningProfit ke liye)
-        const created = saved?.createdAt ? new Date(saved.createdAt) : new Date();
-        const year = created.getFullYear();
+      paidInvoice = await ensurePaidInvoiceForPayment({
+        tenantId,
+        saved,
+        userDoc,
+        ensuredProp,
+        cart,
+      });
 
-        await (new Invoice({
-          customerId: saved.userId || undefined,
-          propertyId: saved.propertyId || undefined,
-
-          // 🔥 NEW: year + profitChannel PlanningProfit ke liye
-          year,
-          profitChannel: saved.profitChannel || 'customer',
-
-
-          lines: [
-            {
-              sku: 'SERVICE-CLEANING',
-              description: 'Cleaning Service',
-              qty: 1,
-              unitPrice: lineAmt,
-              amount: lineAmt,
-            }
-          ],
-          subtotal: lineAmt,
-          tax: 0,
-          total: lineAmt,
-          status: 'paid',
-          payments: [saved._id],
-        })).save();
+      if (paidInvoice?._id) {
+        saved = await Payment.findByIdAndUpdate(
+          saved._id,
+          { $set: { invoice: paidInvoice._id } },
+          { new: true }
+        );
       }
     } catch (e) {
       console.warn('invoice create failed:', e.message);
@@ -546,7 +959,13 @@ router.post('/capture-order', async (req, res) => {
         console.warn('⚠️ JWT_SECRET missing; not issuing JWT from capture-order');
       } else {
         jwtToken = jwt.sign(
-          { userId: String(userDoc._id), role: userDoc.role || 'customer' },
+          {
+            userId: String(userDoc._id),
+            role: userDoc.role || 'customer',
+            tenantId,
+            currentTenantId: String(userDoc.defaultTenantId || tenantId || ''),
+            activeTenantIds: Array.isArray(userDoc.activeTenantIds) ? userDoc.activeTenantIds : [tenantId].filter(Boolean),
+          },
           secret,
           { expiresIn: PORTAL_JWT_TTL }
         );
@@ -572,7 +991,9 @@ router.post('/capture-order', async (req, res) => {
             }
           } catch { }
         }
+
         await ensureCustomerProperty(
+          tenantId,
           String(userDoc._id),
           String(saved?.propertyId || cart.propertyId),
           normalized
@@ -637,11 +1058,17 @@ router.post('/capture-order', async (req, res) => {
 
         // 💰 per-visit price from split
         const priceUsd = shareCentsArr.length ? (shareCentsArr[i] / 100) : 0;
-
         docs.push({
+          tenantId,
           customerId,
-          propertyId: saved?.propertyId || cart?.propertyId || null,
-          property,
+          propertyId: ensuredProp?._id
+            ? String(ensuredProp._id)
+            : (saved?.propertyId || cart?.propertyId || null),
+          property: {
+            ...property,
+            propertyId: String(ensuredProp?.propertyId || saved?.propertyId || cart?.propertyId || ''),
+            propertyMongoId: ensuredProp?._id ? String(ensuredProp._id) : undefined,
+          },
           date: start,
           window: { start, end },
           status: 'offered',
@@ -655,27 +1082,47 @@ router.post('/capture-order', async (req, res) => {
       }
 
       const paymentIdStr = String(saved?._id || '');
-      const already = await Job.countDocuments({ paymentId: paymentIdStr });
+      const already = await Job.countDocuments({
+        tenantId,
+        paymentId: paymentIdStr,
+      });
 
       if (!already && docs.length) {
-        const withLink = docs.map(d => ({
+        let docsWithIds = docs;
+
+        if (docs.length > 0) {
+          const jobIds = await allocateSequenceBlock('jobId', docs.length, 100);
+          docsWithIds = docs.map((d, i) => ({
+            ...d,
+            jobId: jobIds[i],
+          }));
+        }
+
+        const withLink = docsWithIds.map(d => ({
           ...d,
           paymentId: paymentIdStr,
-          orderId,           // traceability
+          orderId,
           source: 'capture',
         }));
 
-        if (docs.length > 0) {
-          // Allocate a contiguous block of jobIds for this batch
-          const jobIds = await allocateSequenceBlock('jobId', docs.length, 100);
-          // Attach jobId to each doc, preserving order
-          for (let i = 0; i < docs.length; i++) {
-            docs[i].jobId = jobIds[i];
+        const insertedJobs = await Job.insertMany(withLink);
+        console.log(`✅ Jobs created on capture: ${withLink.length}`);
+
+        try {
+          const taskCount = await ensureTasksForJobs({
+            tenantId,
+            userId: String(userDoc?._id || saved?.userId || ''),
+            propertyMongoId: ensuredProp?._id ? String(ensuredProp._id) : '',
+            jobs: insertedJobs,
+            cart,
+          });
+
+          if (taskCount) {
+            console.log(`✅ Customer dashboard tasks created: ${taskCount}`);
           }
+        } catch (e) {
+          console.warn('capture-order: task creation failed:', e.message);
         }
-
-
-        await Job.insertMany(withLink);
         console.log(`✅ Jobs created on capture: ${withLink.length}`);
 
         try {
@@ -729,8 +1176,17 @@ router.post('/capture-order', async (req, res) => {
       ok: true,
       data: saved,
       payer: { email: payerEmail, name: payerName },
+      customerEmail: claimedEmail || payerEmail || null,
       jwt: jwtToken,
-      portalRedirect: '/customer/after-pay'
+      portalRedirect: '/customer/after-pay',
+      orderId: String(result?.id || orderId),
+      invoiceId: paidInvoice?._id
+        ? String(paidInvoice._id)
+        : saved?.invoice
+          ? String(saved.invoice)
+          : null,
+      propertyId: String(ensuredProp?.propertyId || saved?.propertyId || ''),
+      propertyMongoId: ensuredProp?._id ? String(ensuredProp._id) : null,
     });
 
   } catch (e) {
@@ -802,13 +1258,13 @@ router.post('/paypal/webhook', express.raw({ type: 'application/json' }), async 
 });
 
 function paypalVerifyUrl() {
-  return (process.env.PAYPAL_ENV === 'live'
+  return (normalizePayPalEnv(process.env.PAYPAL_ENV) === 'live'
     ? 'https://api-m.paypal.com'
     : 'https://api-m.sandbox.paypal.com') + '/v1/notifications/verify-webhook-signature';
 }
 
 async function getAccessToken() {
-  const url = (process.env.PAYPAL_ENV === 'live'
+  const url = (normalizePayPalEnv(process.env.PAYPAL_ENV) === 'live'
     ? 'https://api-m.paypal.com'
     : 'https://api-m.sandbox.paypal.com') + '/v1/oauth2/token';
   const res = await fetch(url, {
@@ -1204,6 +1660,37 @@ router.post('/__debug/mark-void', async (req, res, next) => {
     res.json({ ok: true, modified: r.modifiedCount });
   } catch (e) { next(e); }
 });
+
+router.post('/void-by', auth, requireRole(['admin', 'ops']), async (req, res, next) => {
+  try {
+    const { orderIds = [], captureIds = [] } = req.body || {};
+    const or = [];
+
+    if (Array.isArray(orderIds) && orderIds.length) {
+      or.push({ 'paypal.orderId': { $in: orderIds } });
+    }
+    if (Array.isArray(captureIds) && captureIds.length) {
+      or.push({ 'paypal.captureId': { $in: captureIds } });
+    }
+
+    if (!or.length) {
+      return res.status(400).json({
+        ok: false,
+        error: 'orderIds[] or captureIds[] required',
+      });
+    }
+
+    const r = await Payment.updateMany(
+      { status: 'captured', $or: or },
+      { $set: { status: 'void' } }
+    );
+
+    return res.json({ ok: true, modified: r.modifiedCount });
+  } catch (e) {
+    next(e);
+  }
+});
+
 
 // DEBUG: void by orderIds or captureIds
 router.post('/__debug/mark-void-by', async (req, res, next) => {

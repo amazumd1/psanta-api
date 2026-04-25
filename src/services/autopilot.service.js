@@ -1,92 +1,61 @@
 // services/api/src/services/autopilot.service.js
-const crypto = require('crypto');
-const admin = require('firebase-admin');
-const JobOffer = require('../models/JobOffer');
-const Job = require('../models/Job');
-const { sendSMS } = require('./sms.service');
-const path = require('path');
+const crypto = require("crypto");
+const { admin, ensureFirebaseAdmin } = require("../../lib/firebaseAdminApp");
+const JobOffer = require("../models/JobOffer");
+const Job = require("../models/Job");
+const { sendSMS } = require("./sms.service");
 
 const {
-  OFFERS_SIGNING_SECRET = 'please-change-me',
-  API_BASE_URL = 'http://localhost:5000/api',
-  OFFER_EXPIRE_MIN = '15',
-  OFFER_MAX_CANDIDATES = '10',
+  OFFERS_SIGNING_SECRET,
+  API_BASE_URL = "http://localhost:5000/api",
+  OFFER_EXPIRE_MIN = "15",
+  OFFER_MAX_CANDIDATES = "10",
 } = process.env;
 
 
 // --- Firestore Admin init (robust) ---
-const fs = require('fs');
-
-function initFirestoreOnce() {
-  if (admin.apps.length) return;
-
-  const ENV_PATH   = process.env.GOOGLE_APPLICATION_CREDENTIALS;
-  const LOCAL_PATH = path.resolve(__dirname, '../../serviceAccount.json');
-
-  let saPath = null;
-  if (ENV_PATH && fs.existsSync(ENV_PATH)) {
-    saPath = ENV_PATH;
-  } else if (fs.existsSync(LOCAL_PATH)) {
-    saPath = LOCAL_PATH;
-    // if an invalid env path was set, kill it so ADC doesn't try it later
-    if (ENV_PATH && !fs.existsSync(ENV_PATH)) delete process.env.GOOGLE_APPLICATION_CREDENTIALS;
-  } else {
-    if (ENV_PATH) {
-      console.warn(`⚠️ GOOGLE_APPLICATION_CREDENTIALS points to missing file: ${ENV_PATH}`);
-      delete process.env.GOOGLE_APPLICATION_CREDENTIALS;
-    }
+function getOffersSigningSecret() {
+  if (!OFFERS_SIGNING_SECRET) {
+    throw new Error("OFFERS_SIGNING_SECRET is required");
   }
-
-  let sa = null;
-  if (saPath) {
-    try { sa = require(saPath); } catch (e) {
-      console.warn(`⚠️ Failed to load service account at ${saPath}: ${e.message}`);
-    }
-  }
-
-  const PROJECT_ID =
-    process.env.FIREBASE_PROJECT_ID ||
-    process.env.GOOGLE_CLOUD_PROJECT ||
-    process.env.GCLOUD_PROJECT ||
-    (sa && (sa.project_id || sa.projectId));
-
-  if (sa) {
-    admin.initializeApp({
-      credential: admin.credential.cert(sa),
-      projectId: PROJECT_ID || sa.project_id,
-    });
-    console.log('✅ Firestore: initialized with service account file');
-  } else {
-    admin.initializeApp({
-      credential: admin.credential.applicationDefault(),
-      projectId: PROJECT_ID,
-    });
-    console.log('✅ Firestore: initialized via ADC');
-  }
+  return OFFERS_SIGNING_SECRET;
 }
 
 let fdb = null;
 function getFdb() {
-  if (!fdb) { initFirestoreOnce(); fdb = admin.firestore(); }
+  if (!fdb) {
+    ensureFirebaseAdmin();
+    fdb = admin.firestore();
+  }
   return fdb;
 }
 
 
 
-
-initFirestoreOnce();
-
 /* ---------- Helpers ---------- */
 function signToken(payload) {
-  const data = Buffer.from(JSON.stringify(payload)).toString('base64url');
-  const sig = crypto.createHmac('sha256', OFFERS_SIGNING_SECRET).update(data).digest('base64url');
+  const secret = getOffersSigningSecret();
+  const data = Buffer.from(JSON.stringify(payload)).toString("base64url");
+  const sig = crypto
+    .createHmac("sha256", secret)
+    .update(data)
+    .digest("base64url");
   return `${data}.${sig}`;
 }
+
 function verifyToken(token) {
-  const [data, sig] = token.split('.');
-  const exp = crypto.createHmac('sha256', OFFERS_SIGNING_SECRET).update(data).digest('base64url');
+  const secret = getOffersSigningSecret();
+  const [data, sig] = token.split(".");
+  const exp = crypto
+    .createHmac("sha256", secret)
+    .update(data)
+    .digest("base64url");
   if (exp !== sig) return null;
-  try { return JSON.parse(Buffer.from(data, 'base64url').toString('utf8')); } catch { return null; }
+  try {
+    return JSON.parse(Buffer.from(data, "base64url").toString("utf8"));
+  } catch {
+    return null;
+  }
 }
 const digitsOnly = (s) => String(s || '').replace(/\D/g, '');
 

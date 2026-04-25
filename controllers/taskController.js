@@ -1,6 +1,14 @@
 const Task = require('../models/Task');
 const mongoose = require('mongoose');
 
+function taskFilter(req, extra = {}) {
+  return { tenantId: req.tenantId, ...extra };
+}
+
+function taskIdFilter(req, id) {
+  return { _id: id, tenantId: req.tenantId };
+}
+
 // @desc    Create a new task
 // @route   POST /api/tasks
 // @access  Private/Admin
@@ -8,14 +16,15 @@ exports.createTask = async (req, res) => {
   try {
     const { propertyId, requirements, specialRequirement, scheduledTime, assignedTo } = req.body;
     
-    const task = new Task({
-      propertyId,
-      requirements: requirements || [],
-      specialRequirement,
-      scheduledTime: scheduledTime ? new Date(scheduledTime) : undefined,
-      assignedTo,
-      isActive: true
-    });
+const task = new Task({
+  tenantId: req.tenantId,
+  propertyId,
+  requirements: requirements || [],
+  specialRequirement,
+  scheduledTime: scheduledTime ? new Date(scheduledTime) : undefined,
+  assignedTo,
+  isActive: true
+});
 
     await task.save();
     res.status(201).json({ success: true, data: task });
@@ -31,7 +40,7 @@ exports.createTask = async (req, res) => {
 exports.getTasks = async (req, res) => {
   try {
     const { propertyId, isActive, assignedTo } = req.query;
-    const filter = {};
+    const filter = taskFilter(req);
     
     if (propertyId) filter.propertyId = propertyId;
     if (isActive !== undefined) filter.isActive = isActive === 'true';
@@ -52,7 +61,7 @@ exports.getTasks = async (req, res) => {
 // @access  Private
 exports.getTask = async (req, res) => {
   try {
-    const task = await Task.findById(req.params.id)
+    const task = await Task.findOne(taskIdFilter(req, req.params.id))
       .populate('assignedTo', 'name email');
       
     if (!task) {
@@ -73,8 +82,8 @@ exports.updateTask = async (req, res) => {
   try {
     const { requirements, specialRequirement, scheduledTime, assignedTo, isActive } = req.body;
     
-    const task = await Task.findByIdAndUpdate(
-      req.params.id,
+    const task = await Task.findOneAndUpdate(
+  taskIdFilter(req, req.params.id),
       {
         $set: {
           requirements,
@@ -103,7 +112,7 @@ exports.updateTask = async (req, res) => {
 // @access  Private/Admin
 exports.deleteTask = async (req, res) => {
   try {
-    const task = await Task.findByIdAndDelete(req.params.id);
+    const task = await Task.findOneAndDelete(taskIdFilter(req, req.params.id));
     
     if (!task) {
       return res.status(404).json({ success: false, error: 'Task not found' });
@@ -123,7 +132,7 @@ exports.addPhoto = async (req, res) => {
   try {
     const { url, type, tags, notes } = req.body;
     
-    const task = await Task.findById(req.params.id);
+    const task = await Task.findOne(taskIdFilter(req, req.params.id));
     if (!task) {
       return res.status(404).json({ success: false, error: 'Task not found' });
     }
@@ -155,32 +164,32 @@ exports.addPhoto = async (req, res) => {
 exports.addIssue = async (req, res) => {
   try {
     const { type, description, location, notes, photoId } = req.body;
-    
-    const task = await Task.findById(req.params.id);
+
+    const task = await Task.findOne(taskIdFilter(req, req.params.id));
     if (!task) {
-      return res.status(404).json({ success: false, error: 'Task not found' });
+      return res.status(404).json({ success: false, error: "Task not found" });
     }
-    
+
     const issue = {
       type,
       description,
       location,
       notes,
       photoId,
-      reportedBy: req.user.id,
-      isResolved: false
+      reportedBy: req.user?.userId || req.user?.id || null,
+      isResolved: false,
     };
-    
+
     task.issues.push(issue);
     await task.save();
-    
-    res.status(201).json({ 
-      success: true, 
-      data: task.issues[task.issues.length - 1] 
+
+    res.status(201).json({
+      success: true,
+      data: task.issues[task.issues.length - 1],
     });
   } catch (error) {
-    console.error('Error adding issue:', error);
-    res.status(500).json({ success: false, error: 'Server error' });
+    console.error("Error adding issue:", error);
+    res.status(500).json({ success: false, error: "Server error" });
   }
 };
 
@@ -192,7 +201,7 @@ exports.updateRequirementStatus = async (req, res) => {
     const { taskId, reqIndex, taskIndex } = req.params;
     const { isCompleted } = req.body;
     
-    const task = await Task.findById(taskId);
+    const task = await Task.findOne(taskIdFilter(req, taskId));
     if (!task) {
       return res.status(404).json({ success: false, error: 'Task not found' });
     }

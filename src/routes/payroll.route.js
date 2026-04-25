@@ -1,34 +1,59 @@
-// services/api/src/routes/payroll.route.js
-const express = require('express');
+const crypto = require("crypto");
+const express = require("express");
 const router = express.Router();
-const { runAutoPayrollForToday } = require('../services/payrollAuto.service');
+const { runAutoPayrollForToday } = require("../services/payrollAuto.service");
+const { makeRateLimiter } = require("../../middleware/rateLimit");
 
-// Simple auth for cron calls (optional but recommended)
-// Set PAYROLL_CRON_SECRET in your environment, then call:
-//   GET /api/payroll/auto-run?secret=YOUR_SECRET
+const cronLimiter = makeRateLimiter({
+  windowMs: 60_000,
+  max: process.env.NODE_ENV === "production" ? 10 : 60,
+  keyPrefix: "payroll_cron",
+});
+
+function safeCompare(left, right) {
+  const a = Buffer.from(String(left || ""));
+  const b = Buffer.from(String(right || ""));
+  if (a.length !== b.length) return false;
+  return crypto.timingSafeEqual(a, b);
+}
+
 function assertCronSecret(req) {
-  const configured = process.env.PAYROLL_CRON_SECRET;
-  if (!configured) return; // no secret configured, allow all (Dev)
-  const provided = req.query.secret || req.headers['x-cron-secret'];
-  if (!provided || provided !== configured) {
-    const err = new Error('unauthorized');
+  const configured = String(process.env.PAYROLL_CRON_SECRET || "").trim();
+
+  if (!configured) {
+    if (process.env.NODE_ENV === "production") {
+      const err = new Error("PAYROLL_CRON_SECRET is not configured");
+      err.statusCode = 500;
+      throw err;
+    }
+    return;
+  }
+
+  const provided = String(
+    req.headers["x-cron-secret"] || req.query.secret || ""
+  ).trim();
+
+  if (!provided || !safeCompare(provided, configured)) {
+    const err = new Error("unauthorized");
     err.statusCode = 401;
     throw err;
   }
 }
 
-// GET so you can hit it from Fly.io cron / UptimeRobot etc.
-router.get('/auto-run', async (req, res) => {
+router.get("/auto-run", cronLimiter, async (req, res) => {
   try {
     assertCronSecret(req);
-    const dryRun = req.query.dry === '1' || req.query.dry === 'true';
+
+    const dryValue = String(req.query.dry || "0").toLowerCase();
+    const dryRun = dryValue === "1" || dryValue === "true";
+
     const result = await runAutoPayrollForToday({ dryRun });
-    res.json({ ok: true, ...result });
+    return res.json({ ok: true, ...result });
   } catch (err) {
-    console.error('Payroll auto-run failed', err);
-    res
+    console.error("Payroll auto-run failed", err);
+    return res
       .status(err.statusCode || 500)
-      .json({ ok: false, error: err.message || 'Payroll auto-run failed' });
+      .json({ ok: false, error: err.message || "Payroll auto-run failed" });
   }
 });
 

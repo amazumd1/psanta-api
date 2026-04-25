@@ -77,6 +77,7 @@
 
 // services/api/src/models/Invoice.js
 const mongoose = require('mongoose');
+const { addTenantScope } = require('../../lib/mongooseTenant');
 
 const InvoiceLineSchema = new mongoose.Schema(
   {
@@ -155,6 +156,15 @@ const InvoiceSchema = new mongoose.Schema(
   { timestamps: true }
 );
 
+addTenantScope(InvoiceSchema, {
+  extraIndexes: [
+    { fields: { tenantId: 1, number: 1 } },
+    { fields: { tenantId: 1, customerId: 1, createdAt: -1 } },
+    { fields: { tenantId: 1, propertyId: 1, createdAt: -1 } },
+    { fields: { tenantId: 1, "period.year": 1, "period.month": 1 } },
+  ],
+});
+
 // 🔁 Auto-fix hook: line amounts + subtotal/total/balanceDue
 InvoiceSchema.pre('save', function (next) {
   try {
@@ -204,5 +214,7 @@ InvoiceSchema.pre('save', function (next) {
     next(err);
   }
 });
+
+
 
 module.exports = mongoose.model('Invoice', InvoiceSchema);

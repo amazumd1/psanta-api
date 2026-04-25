@@ -4,6 +4,8 @@ const aiController = require('../controllers/aiController');
 
 const router = express.Router();
 
+// Public helper for booking-to-cleaner brief
+router.post('/public/booking-brief', aiController.generatePublicBookingBrief);
 // Chat and workflow routes
 router.post('/chat', auth, aiController.chatWithAI);
 router.post('/upload-photo', auth, aiController.handlePhotoUpload);

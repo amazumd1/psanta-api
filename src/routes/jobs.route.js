@@ -6,12 +6,23 @@ const Task = require('../models/Task');
 const Property = require('../models/Property');
 const mongoose = require('mongoose');
 
+function jobFilter(req, extra = {}) {
+  return { tenantId: req.tenantId, ...extra };
+}
 
-async function resolvePropertyIdForTask(job) {
+function jobIdFilter(req, id) {
+  return { _id: id, tenantId: req.tenantId };
+}
+
+
+async function resolvePropertyIdForTask(job, tenantId) {
   const pid = job?.propertyId;
   const customerId = job?.customerId ? String(job.customerId) : null;
 
-  const qWithCust = (base) => (customerId ? { ...base, customer: customerId } : base);
+  const qWithCust = (base) =>
+    customerId
+      ? { tenantId, ...base, customer: customerId }
+      : { tenantId, ...base };
 
   // Try by _id if looks like ObjectId
   if (pid && mongoose.isValidObjectId(pid)) {
@@ -40,7 +51,7 @@ async function resolvePropertyIdForTask(job) {
 router.get('/calendar', async (req, res, next) => {
   try {
     const { from, to, propertyId, statusIn, assigned } = req.query || {};
-    const q = {};
+    const q = { tenantId: req.tenantId };
 
     // time range on `date`
     if (from || to) q.date = {};
@@ -111,19 +122,24 @@ router.patch('/:id/assign', async (req, res, next) => {
     if (durationMinutes) $set.durationMinutes = Number(durationMinutes);
 
     // 1) Update job
-    const job = await Job.findByIdAndUpdate(id, { $set }, { new: true }).lean();
+    const job = await Job.findOneAndUpdate(
+      jobIdFilter(req, id),
+      { $set },
+      { new: true }
+    ).lean();
     if (!job) return res.status(404).json({ ok: false, error: 'not found' });
 
     // 2) Resolve Property Mongo _id to keep customer filter working
-    const propIdForTask = await resolvePropertyIdForTask(job);
+    const propIdForTask = await resolvePropertyIdForTask(job, req.tenantId);
     const scheduled = job.date ? new Date(job.date) : new Date();
 
     // 3) Upsert Task linked by jobId (also fix older tasks' propertyId)
     await Task.findOneAndUpdate(
-      { jobId: String(job._id) },
+  { jobId: String(job._id), tenantId: req.tenantId },
       {
         $setOnInsert: {
           jobId: String(job._id),
+          tenantId: req.tenantId,
           isActive: true,
           requirements: [],
         },
@@ -161,17 +177,17 @@ router.patch('/:id/unassign', async (req, res, next) => {
   try {
     const { id } = req.params;
 
-    const doc = await Job.findByIdAndUpdate(
-      id,
+const doc = await Job.findOneAndUpdate(
+  jobIdFilter(req, id),
       { $set: { assignedContractorId: null, status: 'pending' } },
       { new: true }
     ).lean();
     if (!doc) return res.status(404).json({ ok: false, error: 'not found' });
 
     // Clear assignment + ensure propertyId normalized too
-    const propIdForTask = await resolvePropertyIdForTask(doc);
-    await Task.findOneAndUpdate(
-      { jobId: String(id) },
+    const propIdForTask = await resolvePropertyIdForTask(doc, req.tenantId);
+await Task.findOneAndUpdate(
+  { jobId: String(id), tenantId: req.tenantId },
       { $set: { assignedTo: null, ...(propIdForTask ? { propertyId: propIdForTask } : {}) } },
       { new: true }
     );
@@ -187,7 +203,7 @@ router.post('/:id/suggest-cleaners', async (req, res, next) => {
   try {
     const { id } = req.params;
     const { top = 5 } = req.body || {};
-    const job = await Job.findById(id).lean();
+    const job = await Job.findOne(jobIdFilter(req, id)).lean();
     if (!job) return res.status(404).json({ ok: false, error: 'job not found' });
 
     const cleaners = await getCleaners();

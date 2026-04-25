@@ -6,26 +6,39 @@
  *   set GOOGLE_APPLICATION_CREDENTIALS / FIREBASE_PROJECT_ID as needed
  *   node scripts/checkContractBizPhones.js
  */
-const admin = require("firebase-admin");
-const path = require("path");
+// const admin = require("firebase-admin");
+// const path = require("path");
 
-const SA_PATH = process.env.GOOGLE_APPLICATION_CREDENTIALS || path.resolve(__dirname, "../serviceAccount.json");
-let sa = null;
-try { sa = require(SA_PATH); } catch (e) {}
+// const SA_PATH = process.env.GOOGLE_APPLICATION_CREDENTIALS || path.resolve(__dirname, "../serviceAccount.json");
+// let sa = null;
+// try { sa = require(SA_PATH); } catch (e) {}
 
+// const PROJECT_ID =
+//   process.env.FIREBASE_PROJECT_ID ||
+//   process.env.GOOGLE_CLOUD_PROJECT ||
+//   process.env.GCLOUD_PROJECT ||
+//   (sa && (sa.project_id || sa.projectId));
+
+// if (sa) {
+//   admin.initializeApp({ credential: admin.credential.cert(sa), projectId: PROJECT_ID || sa.project_id });
+// } else {
+//   admin.initializeApp({ credential: admin.credential.applicationDefault(), projectId: PROJECT_ID });
+// }
+
+// const db = admin.firestore();
+
+const { loadLocalEnv } = require("../lib/loadLocalEnv");
+loadLocalEnv();
+
+const { admin, ensureFirebaseAdmin } = require("../lib/firebaseAdminApp");
+ensureFirebaseAdmin();
+
+const db = admin.firestore();
 const PROJECT_ID =
   process.env.FIREBASE_PROJECT_ID ||
   process.env.GOOGLE_CLOUD_PROJECT ||
   process.env.GCLOUD_PROJECT ||
-  (sa && (sa.project_id || sa.projectId));
-
-if (sa) {
-  admin.initializeApp({ credential: admin.credential.cert(sa), projectId: PROJECT_ID || sa.project_id });
-} else {
-  admin.initializeApp({ credential: admin.credential.applicationDefault(), projectId: PROJECT_ID });
-}
-
-const db = admin.firestore();
+  admin.app().options.projectId;
 
 (async () => {
   const col = db.collection("contractBusinesses");

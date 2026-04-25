@@ -3,6 +3,100 @@ const Task = require('../models/Task');
 const geminiService = require('../services/geminiService');
 const scoringService = require('../services/scoringService');
 
+function asArray(value) {
+  return Array.isArray(value) ? value : [];
+}
+
+function normalizeAddonList(addons) {
+  if (Array.isArray(addons)) {
+    return addons.map((item) => String(item || '').trim()).filter(Boolean);
+  }
+  if (addons && typeof addons === 'object') {
+    return Object.entries(addons)
+      .filter(([, enabled]) => Boolean(enabled))
+      .map(([key]) => String(key || '').trim())
+      .filter(Boolean);
+  }
+  return [];
+}
+
+function normalizeSchedule(schedule) {
+  return asArray(schedule)
+    .map((slot) => ({
+      date: String(slot?.date || '').trim(),
+      time: String(slot?.time || '10:00').trim() || '10:00',
+    }))
+    .filter((slot) => slot.date);
+}
+
+function buildFallbackBookingBrief(payload = {}) {
+  const addonList = normalizeAddonList(payload.addons);
+  const schedule = normalizeSchedule(payload.schedule);
+  const firstStop = schedule[0] || null;
+  const visitWord = schedule.length === 1 ? 'visit' : 'visits';
+  const sizeBits = [
+    Number(payload.beds) > 0 ? `${Number(payload.beds)} bed` : null,
+    Number(payload.baths) > 0 ? `${Number(payload.baths)} bath` : null,
+    Number(payload.sqft) > 0 ? `${Number(payload.sqft)} sqft` : null,
+  ].filter(Boolean);
+
+  const summaryParts = [
+    `${String(payload.serviceType || 'standard').replace(/_/g, ' ')} cleaning`,
+    sizeBits.length ? `for ${sizeBits.join(' / ')}` : null,
+    payload.condition ? `condition: ${payload.condition}` : null,
+    schedule.length ? `${schedule.length} scheduled ${visitWord}` : 'schedule pending',
+    firstStop ? `first arrival ${firstStop.date} at ${firstStop.time}` : null,
+    Number(payload.aiMinutes) > 0 ? `estimated onsite time ${Number(payload.aiMinutes)} mins` : null,
+    payload.maintenanceLabel && payload.maintenanceLabel !== 'No maintenance add-on'
+      ? `maintenance attached: ${payload.maintenanceLabel}`
+      : null,
+  ].filter(Boolean);
+
+  const cleanerChecklist = [
+    payload.serviceType === 'deep'
+      ? 'Start with kitchen and bathrooms, then detail high-touch surfaces, baseboards, and visible edges.'
+      : 'Follow the standard room reset flow: kitchen, bathrooms, living areas, bedrooms, then final walkthrough.',
+    addonList.length
+      ? `Complete selected add-ons: ${addonList.join(', ')}.`
+      : 'No special add-ons selected on this booking.',
+    schedule.length > 1
+      ? `Treat this as a multi-visit plan. Keep notes consistent across all ${schedule.length} visits.`
+      : 'Close the visit with a quick final reset note for Ops.',
+    'Capture arrival, progress, and completion notes if something blocks the clean.',
+  ];
+
+  const roomFocus = [
+    payload.serviceType === 'deep'
+      ? 'Kitchen: appliance fronts, backsplash, sink detail, cabinet touchpoints.'
+      : 'Kitchen: counters, sink, appliance exterior, trash reset.',
+    'Bathrooms: mirrors, sink, toilet, shower/tub surfaces, floor edges.',
+    'Living + bedrooms: dust reachable surfaces, reset floors, straighten visible presentation areas.',
+    addonList.includes('pet')
+      ? 'Pet areas: hair pickup, odor check, and visible surface wipe-down.'
+      : 'Entry + touchpoints: handles, switches, and obvious fingerprint zones.',
+  ];
+
+  const opsNotes = [
+    payload.maintenanceLabel && payload.maintenanceLabel !== 'No maintenance add-on'
+      ? `Ops should attach ${payload.maintenanceLabel} instructions to the cleaner packet.`
+      : 'No maintenance add-on was selected for this booking.',
+    payload.packId
+      ? `This booking is tied to plan ${payload.packId}; keep the first visit quality bar high because it anchors future visits.`
+      : 'Pay-as-you-go booking; no recurring plan bundle selected.',
+    Number(payload.checkoutTotal) > 0
+      ? `Customer checkout total captured at $${Number(payload.checkoutTotal).toFixed(2)}.`
+      : 'Checkout total not provided in the request payload.',
+  ];
+
+  return {
+    source: 'fallback',
+    summary: summaryParts.join(' · '),
+    cleanerChecklist,
+    roomFocus,
+    opsNotes,
+  };
+}
+
 // Helper to get manual requirements for a room
 const getManualRequirementsForRoom = (property, roomType) => {
   if (!property || !property.roomTasks) return '';
@@ -45,7 +139,7 @@ const chatWithAI = async (req, res) => {
 
     if (currentTaskId) {
       const task = await Task.findById(currentTaskId);
-      console.log(task,'------task-----------------')
+      console.log(task, '------task-----------------')
       if (task) {
         // Check if task has chat history and restore context
         if (task.chatHistory && task.chatHistory.length > 0) {
@@ -53,9 +147,9 @@ const chatWithAI = async (req, res) => {
           await geminiService.restoreContextFromHistory(currentTaskId);
         } else {
           // New task, set initial context
-          geminiService.updateContext({ 
-            currentProperty: task, 
-            workflowState: geminiService.getContext(currentTaskId).workflowState || 'initial' 
+          geminiService.updateContext({
+            currentProperty: task,
+            workflowState: geminiService.getContext(currentTaskId).workflowState || 'initial'
           }, currentTaskId);
         }
       }
@@ -64,7 +158,7 @@ const chatWithAI = async (req, res) => {
     const aiResponse = await geminiService.generateChatResponse(message, currentTaskId);
     const context = geminiService.getContext(currentTaskId);
 
-        // Save chat history to task (skip if flag is set)
+    // Save chat history to task (skip if flag is set)
     if (currentTaskId && !skipChatHistory) {
       try {
         const task = await Task.findById(currentTaskId);
@@ -203,14 +297,14 @@ const analyzeBeforeAfterPhotos = async (req, res) => {
 
     let manualRequirements = '';
     let currentTaskId = taskId;
-    
+
     if (!currentTaskId && propertyId) {
       const task = await Task.findOne({ propertyId: propertyId });
       if (task) {
         currentTaskId = task._id.toString();
       }
     }
-    
+
     if (currentTaskId) {
       const task = await Task.findById(currentTaskId);
       if (task) {
@@ -224,7 +318,7 @@ const analyzeBeforeAfterPhotos = async (req, res) => {
     }
 
     const analysis = await geminiService.analyzeBeforeAfterComparison(beforePhotoBase64, afterPhotoBase64, roomType, manualRequirements, currentTaskId);
-    
+
     // Save AI analysis response to chat history
     if (currentTaskId && analysis.message) {
       try {
@@ -252,7 +346,7 @@ const analyzeBeforeAfterPhotos = async (req, res) => {
         // Continue even if save fails
       }
     }
-    
+
     res.json({ success: true, data: analysis });
   } catch (error) {
     console.error('Before/After analysis error:', error);
@@ -268,14 +362,14 @@ const analyzePhotoWithManual = async (req, res) => {
 
     let manualRequirements = '';
     let currentTaskId = taskId;
-    
+
     if (!currentTaskId && propertyId) {
       const task = await Task.findOne({ propertyId: propertyId });
       if (task) {
         currentTaskId = task._id.toString();
       }
     }
-    
+
     if (currentTaskId) {
       const task = await Task.findById(currentTaskId);
       if (task) {
@@ -289,7 +383,7 @@ const analyzePhotoWithManual = async (req, res) => {
     }
 
     const analysis = await geminiService.analyzePhotoWithManual(photoBase64, photoType, roomType, manualRequirements);
-    
+
     // Save AI analysis response to chat history
     if (currentTaskId && analysis.message) {
       try {
@@ -317,7 +411,7 @@ const analyzePhotoWithManual = async (req, res) => {
         // Continue even if save fails
       }
     }
-    
+
     res.json({ success: true, data: analysis });
   } catch (error) {
     console.error('Photo analysis error:', error);
@@ -348,7 +442,7 @@ const getWorkflowState = async (req, res) => {
     if (!taskId) {
       return res.status(400).json({ success: false, message: 'Task ID is required' });
     }
-    
+
     const context = geminiService.getContext(taskId);
     res.json({
       success: true,
@@ -430,7 +524,7 @@ const saveChatMessage = async (taskId, messageData) => {
 const saveChatMessageAPI = async (req, res) => {
   try {
     const { taskId, message, sender, type, isCommand, commandType, data, imageUrl, imageType, roomType } = req.body;
-    
+
     if (!taskId || !message || !sender) {
       return res.status(400).json({ success: false, message: 'Task ID, message, and sender are required' });
     }
@@ -458,7 +552,7 @@ const saveChatMessageAPI = async (req, res) => {
 const resetWorkflow = async (req, res) => {
   try {
     const { propertyId, taskId } = req.body;
-    
+
     // Get the task ID - either from request body or find it from propertyId
     let currentTaskId = taskId;
     if (!currentTaskId && propertyId) {
@@ -467,11 +561,11 @@ const resetWorkflow = async (req, res) => {
         currentTaskId = task._id.toString();
       }
     }
-    
+
     if (!currentTaskId) {
       return res.status(400).json({ success: false, message: 'Task ID or Property ID is required' });
     }
-    
+
     geminiService.updateContext({
       workflowState: 'initial',
       beforePhotosLogged: [],
@@ -510,11 +604,11 @@ const updateWorkflowProgress = async (req, res) => {
 const updateContext = async (req, res) => {
   try {
     const { currentProperty, currentRoom, completedTasks, photos, manualTips, currentWorkflow, taskId } = req.body;
-    
+
     if (!taskId) {
       return res.status(400).json({ success: false, message: 'Task ID is required' });
     }
-    
+
     geminiService.updateContext({
       currentProperty,
       currentRoom,
@@ -534,7 +628,7 @@ const updateContext = async (req, res) => {
 const resetAIContext = async (req, res) => {
   try {
     const { taskId } = req.body;
-    
+
     if (taskId) {
       // Reset specific task context
       geminiService.resetContext(taskId);
@@ -644,6 +738,85 @@ const getPropertyScoringSummary = async (req, res) => {
   }
 };
 
+const generatePublicBookingBrief = async (req, res) => {
+  try {
+    const payload = req.body || {};
+    const fallback = buildFallbackBookingBrief(payload);
+
+    if (!payload || typeof payload !== 'object') {
+      return res.status(400).json({ success: false, message: 'Booking payload is required' });
+    }
+
+    const addonList = normalizeAddonList(payload.addons);
+    const schedule = normalizeSchedule(payload.schedule);
+    const prompt = `You are preparing a concise cleaner-facing booking brief for a residential cleaning visit.
+
+Return STRICT JSON with this shape only:
+{
+  "summary": "string",
+  "cleanerChecklist": ["string"],
+  "roomFocus": ["string"],
+  "opsNotes": ["string"]
+}
+
+Rules:
+- Keep it operational, concrete, and short.
+- Do not mention being an AI.
+- Do not invent issues, damage, or promises.
+- Use the booking facts only.
+- Mention maintenance add-on only if one is selected.
+- Keep each bullet under 18 words.
+
+Booking facts:
+Service type: ${String(payload.serviceType || 'standard')}
+Condition: ${String(payload.condition || 'normal')}
+Request flow: ${String(payload.serviceRequestType || 'instant')}
+Frequency: ${String(payload.frequency || 'once')}
+Beds: ${Number(payload.beds || 0)}
+Baths: ${Number(payload.baths || 0)}
+Square footage: ${Number(payload.sqft || 0)}
+Selected add-ons: ${addonList.length ? addonList.join(', ') : 'none'}
+Maintenance label: ${String(payload.maintenanceLabel || 'none')}
+Pack id: ${String(payload.packId || 'none')}
+Visits scheduled: ${schedule.length}
+First slot: ${schedule[0] ? `${schedule[0].date} ${schedule[0].time}` : 'not provided'}
+Estimated cleaning minutes: ${Number(payload.aiMinutes || 0)}
+City/state: ${[payload.city, payload.state].filter(Boolean).join(', ') || 'not provided'}
+Checkout total: ${Number(payload.checkoutTotal || 0)}`;
+
+    if (!geminiService?.model) {
+      return res.json({ success: true, data: fallback });
+    }
+
+    try {
+      const result = await geminiService.model.generateContent(prompt, {
+        generationConfig: { temperature: 0.2, top_p: 0.9 },
+      });
+      const response = await result.response;
+      const raw = String(response.text() || '').trim();
+      const cleaned = raw.replace(/^```json\s*/i, '').replace(/^```\s*/i, '').replace(/```$/i, '').trim();
+      const parsed = JSON.parse(cleaned);
+
+      return res.json({
+        success: true,
+        data: {
+          source: 'gemini',
+          summary: String(parsed?.summary || fallback.summary),
+          cleanerChecklist: asArray(parsed?.cleanerChecklist).filter(Boolean).slice(0, 6),
+          roomFocus: asArray(parsed?.roomFocus).filter(Boolean).slice(0, 6),
+          opsNotes: asArray(parsed?.opsNotes).filter(Boolean).slice(0, 6),
+        },
+      });
+    } catch (error) {
+      console.error('Public booking brief AI error:', error);
+      return res.json({ success: true, data: fallback });
+    }
+  } catch (error) {
+    console.error('Generate public booking brief error:', error);
+    return res.status(500).json({ success: false, message: 'Failed to generate booking brief' });
+  }
+};
+
 module.exports = {
   chatWithAI,
   handlePhotoUpload,
@@ -651,6 +824,7 @@ module.exports = {
   analyzeBeforeAfterPhotos,
   analyzePhotoWithManual,
   generateWorkflowGuidance,
+  generatePublicBookingBrief,
   getWorkflowState,
   getChatHistory,
   saveChatMessageAPI,

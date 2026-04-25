@@ -4,8 +4,11 @@ const bcrypt = require('bcryptjs');
 const userSchema = new mongoose.Schema({
   name: {
     type: String,
-    required: true,
-    trim: true
+    trim: true,
+    default: '',
+    required: function () {
+      return !this.firebaseUid && !this.phone;
+    }
   },
   email: {
     type: String,
@@ -14,28 +17,66 @@ const userSchema = new mongoose.Schema({
     lowercase: true,
     trim: true
   },
+
+  // Legacy password auth (transitional)
   password: {
     type: String,
+    minlength: 6,
     required: function () {
-      return !this.phone; // Password not required if phone exists (OTP login)
-    },
-    minlength: 6
+      return !this.phone && !this.firebaseUid;
+    }
   },
+
+  // Firebase-first auth fields
+  firebaseUid: {
+    type: String,
+    index: true,
+    unique: true,
+    sparse: true,
+    default: null
+  },
+  authProvider: {
+    type: String,
+    enum: ['password', 'firebase', 'hybrid'],
+    default: 'password'
+  },
+  emailVerified: {
+    type: Boolean,
+    default: false
+  },
+
+  // SaaS-ready identity metadata
+  defaultTenantId: {
+    type: String,
+    default: null
+  },
+  activeTenantIds: [{
+    type: String,
+    trim: true
+  }],
+  tokenVersion: {
+    type: Number,
+    default: 0
+  },
+
   mustSetPassword: { type: Boolean, default: false },
-resetPasswordToken: { type: String, default: null },
-resetPasswordExpires: { type: Date, default: null },
+  resetPasswordToken: { type: String, default: null },
+  resetPasswordExpires: { type: Date, default: null },
+
   phone: {
     type: String,
+    trim: true,
     required: function () {
-      return !this.password; // Phone not required if password exists
-    },
-    trim: true
+      return !this.password && !this.firebaseUid;
+    }
   },
+
   role: {
     type: String,
     enum: ['admin', 'cleaner', 'customer', 'warehouse'],
     default: 'customer'
   },
+
   avatar: {
     type: String,
     default: null
@@ -67,15 +108,18 @@ resetPasswordExpires: { type: Date, default: null },
     type: Date,
     default: null
   },
+  unlockLockedUntil: { type: Date },
+  psCooldownUntil: { type: Date },
   otp: String,
   otpExpiresAt: Date
 }, {
   timestamps: true
 });
 
-// Hash password before saving
+// Hash password before saving (legacy password users only)
 userSchema.pre('save', async function (next) {
   if (!this.isModified('password')) return next();
+  if (!this.password) return next();
 
   try {
     const salt = await bcrypt.genSalt(10);
@@ -86,17 +130,19 @@ userSchema.pre('save', async function (next) {
   }
 });
 
-// Compare password method
 userSchema.methods.comparePassword = async function (candidatePassword) {
+  if (!this.password) return false;
   return bcrypt.compare(candidatePassword, this.password);
 };
 
-// Remove password from JSON output
 userSchema.methods.toJSON = function () {
   const user = this.toObject();
   delete user.password;
+  delete user.otp;
+  delete user.otpExpiresAt;
+  delete user.resetPasswordToken;
+  delete user.resetPasswordExpires;
   return user;
 };
 
 module.exports = mongoose.model('User', userSchema);
-

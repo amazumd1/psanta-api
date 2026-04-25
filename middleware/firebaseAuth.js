@@ -1,44 +1,62 @@
-// services/api/middleware/firebaseAuth.js
-const admin = require("firebase-admin");
+const { admin, ensureFirebaseAdmin } = require("../lib/firebaseAdminApp");
 
-/**
- * Make sure you initialize firebase-admin ONCE in your server boot.
- * If already initialized elsewhere, keep that and remove init here.
- */
-function ensureFirebaseAdmin() {
-  if (admin.apps.length) return;
-  const json = process.env.FIREBASE_ADMIN_JSON;
-  if (!json) {
-    throw new Error("FIREBASE_ADMIN_JSON not set");
-  }
-  admin.initializeApp({
-    credential: admin.credential.cert(JSON.parse(json)),
-  });
+function getBearerToken(req) {
+  const h = req.headers.authorization || req.headers.Authorization || "";
+  const m = h.match(/^Bearer\s+(.+)$/i);
+  return m?.[1] || null;
 }
 
-// ✅ verifies Firebase ID token and sets req.firebaseUser
+function isDev() {
+  return process.env.NODE_ENV !== "production";
+}
+
 async function firebaseAuth(req, res, next) {
   try {
     ensureFirebaseAdmin();
 
-    const h = req.headers.authorization || "";
-    const m = h.match(/^Bearer\s+(.+)$/i);
-    const token = m?.[1];
-
+    const token = getBearerToken(req);
     if (!token) {
-      return res.status(401).json({ ok: false, error: "Missing Bearer token" });
+      return res.status(401).json({
+        ok: false,
+        error: "Missing Bearer token",
+      });
     }
 
     const decoded = await admin.auth().verifyIdToken(token);
-    req.firebaseUser = decoded; // contains uid, email (if any), etc.
+    req.firebaseUser = decoded;
     return next();
   } catch (e) {
-    console.error("firebaseAuth error:", e?.message || e);
-    return res.status(401).json({ ok: false, error: "Invalid token" });
+    const message = e?.message || "Invalid token";
+    const code = e?.code || "firebase-auth-failed";
+
+    console.error("firebaseAuth error:", {
+      code,
+      message,
+      projectId:
+        admin.apps[0]?.options?.projectId ||
+        process.env.FIREBASE_PROJECT_ID ||
+        null,
+    });
+
+    return res.status(401).json({
+      ok: false,
+      error: "Invalid token",
+      ...(isDev()
+        ? {
+            debug: {
+              code,
+              message,
+              projectId:
+                admin.apps[0]?.options?.projectId ||
+                process.env.FIREBASE_PROJECT_ID ||
+                null,
+            },
+          }
+        : {}),
+    });
   }
 }
 
-// ✅ your function (as-is) — email OR uid allowlist
 function requireOpsAdmin(req, res, next) {
   const email = String(req.firebaseUser?.email || "").toLowerCase().trim();
   const uid = String(req.firebaseUser?.uid || "").trim();

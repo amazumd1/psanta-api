@@ -1,4 +1,5 @@
 const mongoose = require('mongoose');
+const { addTenantScope } = require('../../lib/mongooseTenant');
 const { Schema } = mongoose;
 const Counter = require('./Counter');
 
@@ -33,6 +34,14 @@ JobSchema.index({ date: 1 });
 JobSchema.index({ status: 1, date: 1 });
 JobSchema.index({ assignedContractorId: 1, date: 1 });
 JobSchema.index({ paymentId: 1, date: 1 }, { background: true });
+
+addTenantScope(JobSchema, {
+  extraIndexes: [
+    { fields: { tenantId: 1, date: 1 } },
+    { fields: { tenantId: 1, assignedContractorId: 1, date: 1 } },
+    { fields: { tenantId: 1, paymentId: 1, date: 1 } },
+  ],
+});
 
 /** Atomic allocator — first ID = 200 (base = 199) */
 async function allocNextSeq(incrementBy = 1) {

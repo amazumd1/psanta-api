@@ -8,11 +8,12 @@
     "start": "node server.js",
     "dev": "nodemon --exec \"node --experimental-print-required-tla\" server.js",
     "test": "echo \"Error: no test specified\" && exit 1",
+    "test:smoke": "node --test ./tests/*.smoke.test.cjs",
     "seed:skus": "node scripts/seed-skus.js",
     "fix:index:wo": "node ./src/scripts/fix_wo_index.js",
     "seed:contractBiz:phones": "node scripts/backfillContractBusinessPhones.js",
     "backfill:jobids": "node scripts/backfill-jobids.js --startAt=100 --batchSize=1000",
-    "seed:admin": "node -r dotenv/config scripts/seed-admin.js"
+    "seed:admin": "node scripts/seed-admin.js"
   },
   "keywords": [
     "cleaning",
@@ -45,7 +46,9 @@
     "sharp": "^0.34.5",
     "socket.io": "^4.8.1",
     "twilio": "^5.10.2",
-    "uuid": "^13.0.0"
+    "uuid": "^13.0.0",
+    "html-to-text": "^9.0.5",
+    "mailparser": "^3.9.0"
   },
   "devDependencies": {
     "nodemon": "^3.1.10"

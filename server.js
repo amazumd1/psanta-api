@@ -12,36 +12,56 @@ const net = require('net');
 
 const { firebaseAuth, requireOpsAdmin } = require("./middleware/firebaseAuth");
 const inviteRoutes = require("./routes/invite.routes");
+const { loadLocalEnv } = require("./lib/loadLocalEnv");
+const { assertRuntimeEnv } = require("./lib/runtimeGuard");
 
-if (!process.env.VERCEL) {
-  require("dotenv").config({ path: path.resolve(__dirname, ".env") });
-  console.log("ENV loaded from", path.resolve(__dirname, ".env"));
-}
+loadLocalEnv();
+assertRuntimeEnv();
+
+const generalDataGmailRoutes = require("./routes/generalData.gmail.routes");
+const internalLegacyGmailReceiptsRoutes = require("./routes/internal/legacyGmailReceipts.routes");
+const retailGmailReceiptsRoutes = require("./routes/retailReceipts.gmail.routes");
+const businessIntelligenceRoutes = require("./routes/businessIntelligence.routes");
+const businessIntelligenceWebhookRoutes = require("./routes/businessIntelligenceWebhook.routes");
+
+const { startRetailReceiptScheduler } = require("./lib/retailReceiptScheduler");
+
+const {
+  requestContext,
+  securityHeaders,
+  httpAuditLogger,
+  blockDebugInProduction,
+} = require("./middleware/requestHardening");
+const { makeRateLimiter } = require("./middleware/rateLimit");
 
 const { auth } = require('./middleware/auth');
 const { requireRole } = require('./middleware/roles');
 const bcrypt = require('bcryptjs');
 const customerOrders = require('./src/routes/customer/orders.route');
+const psRequests = require("./routes/psRequests");
+const psStr = require("./routes/psStr");
+const { requireTenantAccess, requireTenantRole } = require("./middleware/tenantAccess");
+
 
 
 
 const cookieParser = require('cookie-parser');
-// If FIREBASE_SERVICE_ACCOUNT_JSON is provided, write it to /tmp and point GOOGLE_APPLICATION_CREDENTIALS
-if (process.env.FIREBASE_SERVICE_ACCOUNT_JSON && !process.env.GOOGLE_APPLICATION_CREDENTIALS) {
-  const saPath = path.join('/tmp', 'firebase_sa.json');
-  try {
-    fs.writeFileSync(saPath, process.env.FIREBASE_SERVICE_ACCOUNT_JSON, { encoding: 'utf8' });
-    process.env.GOOGLE_APPLICATION_CREDENTIALS = saPath;
-    console.log('✅ Wrote Firebase SA to', saPath);
-  } catch (e) {
-    console.error('❌ Failed to write Firebase SA:', e.message);
-  }
-}
 
 
 
 const app = express();
+app.disable("x-powered-by");
 app.set('trust proxy', 1); // behind Render/Proxy
+
+app.use(requestContext);
+app.use(securityHeaders);
+app.use(httpAuditLogger);
+
+const authLimiter = makeRateLimiter({
+  windowMs: 10 * 60 * 1000,
+  max: process.env.NODE_ENV === "production" ? 40 : 200,
+  keyPrefix: "auth",
+});
 
 const PORT = Number(process.env.PORT) || 5000;
 
@@ -179,7 +199,7 @@ app.get('/health', (req, res) => {
 });
 // ✅ Home (so Vercel "/" doesn't 404)
 app.get("/", (req, res) => {
-  res.status(200).send("PSanta API is running ✅  Try /health or /__debug/routes");
+  res.status(200).send("PSanta API is running ✅  Try /health");
 });
 
 // ✅ Favicon (browser auto-hits it)
@@ -188,7 +208,7 @@ app.get("/favicon.ico", (req, res) => {
 });
 
 /* -------------------- Quick route list -------------------- */
-app.get('/__debug/routes', (req, res) => {
+app.get('/__debug/routes', blockDebugInProduction, (req, res) => {
   const out = [];
   app._router.stack.forEach((m) => {
     if (m.route?.path) {
@@ -203,7 +223,7 @@ app.get('/__debug/routes', (req, res) => {
   res.json(out);
 });
 
-app.get('/__debug/wh-model', (req, res) => {
+app.get('/__debug/wh-model', blockDebugInProduction, (req, res) => {
   const M = require('./src/models/WarehouseOrder');
   res.json({
     file: require.resolve('./src/models/WarehouseOrder'),
@@ -251,22 +271,47 @@ function mountRoutes() {
 /* -------------------- CJS routes -------------------- */
 const authRoutes = require('./routes/auth');
 const taskRoutes = require('./routes/tasks');
-// const aiRoutes = require('./routes/ai');
+const aiRoutes = require('./routes/ai');
 const propertyRoutes = require('./routes/properties');
 const userRoutes = require('./routes/userRoutes');
+const businessRoutes = require("./routes/business.routes");
+const workspaceRoutes = require("./routes/workspace.routes");
+const billingRoutes = require("./routes/billing.routes");
 
-
-app.use('/api/auth', authRoutes);
-app.use('/api/tasks', taskRoutes);
-// app.use('/api/ai', aiRoutes);
-app.use('/api/properties', propertyRoutes);
+app.use('/api/auth', authLimiter, authRoutes);
+app.use('/api/tasks', auth, requireTenantAccess, taskRoutes);
+app.use('/api/ai', aiRoutes);
+app.use('/api/properties', auth, propertyRoutes);
 app.use('/api/users', userRoutes);
+app.use("/api/business", auth, requireTenantAccess, businessRoutes);
+app.use("/api/workspaces", workspaceRoutes);
+app.use("/api/billing", auth, billingRoutes);
 app.use('/api/host', require('./routes/host.onboarding'));
 app.use('/api/admin', require('./routes/admin.orders'));
 app.use('/api/pricing', require('./routes/pricing.routes'));
 app.use("/api/invite", firebaseAuth, requireOpsAdmin, inviteRoutes);
 app.use("/api/tx", auth, require("./routes/tx.screenshot"));
 app.use("/api/uploads", auth, require("./routes/cloudinary.upload"));
+app.use("/api/finance", auth, require("./routes/finance.transactions"));
+app.use("/api/pc/str", require("./routes/psStr")); // frontend fallbacks
+app.use('/api/pc', require('./routes/pc'));
+
+// app.use("/api/ps/str", psStr);          // ✅ ADD THIS (before /api/ps)
+app.use("/api/ps", require("./routes/pc"));
+app.use("/api/ps", psRequests);
+// ✅ STR listing + AI extraction
+safeUse("/api/ps/str", require("./routes/psStr"));
+safeUse("/api/ps/str/calendar", require("./routes/psStrCalendar"));
+safeUse("/api/ps/ai/str", require("./routes/psAiStr"));
+// ✅ STR AI (Gemini proxy + regex fallback)
+app.use("/api/pc/ai/str", require("./routes/psAiStr"));
+
+
+// PropertySanta STR listings (photos, calendar, admin insights, etc.)
+// Frontend calls: /ps/str/* -> API_BASE (/api) + /ps/str/*
+// app.use("/api/ps/str/calendar", require("./routes/psStrCalendar"));
+
+
 
 
 
@@ -295,26 +340,61 @@ safeUse('/api/wh/topup', require('./src/routes/wh/topup.route'));
 safeUse('/api/ics', require('./src/routes/ics.route'));
 safeUse('/api/payments', require('./src/routes/payments/paypal.route'));
 safeUse('/api/invoices', require('./src/routes/invoices.route'));
-safeUse('/api/jobs', require('./src/routes/jobs.route'));
+safeUse('/api/jobs', auth, requireTenantAccess, require('./src/routes/jobs.route'));
 safeUse('/api/offers', require('./src/routes/offers.route'));
 safeUse('/api/config', require('./src/routes/config.route'));
-safeUse('/api/ceo', require('./src/routes/ceo.route'));
-safeUse('/api/customer/summary', require('./src/routes/customer/summary.route'));
-safeUse('/api/customer/orders', require('./src/routes/customer/orders.route'));
-safeUse('/api/customer/properties', require('./src/routes/customer/properties.route'));
-safeUse('/api/customer/tasks', require('./src/routes/customer/tasks.route'));
+safeUse(
+  '/api/ceo',
+  auth,
+  requireTenantAccess,
+  requireTenantRole(['owner', 'admin', 'ops']),
+  require('./src/routes/ceo.route')
+);
+safeUse(
+  '/api/customer/summary',
+  auth,
+  requireTenantAccess,
+  require('./src/routes/customer/summary.route')
+);
+// safeUse('/api/customer/orders', require('./src/routes/customer/orders.route'));
+safeUse(
+  '/api/customer/orders',
+  auth,
+  requireTenantAccess,
+  require('./src/routes/customer/orders.route')
+);
+safeUse(
+  '/api/customer/properties',
+  auth,
+  requireTenantAccess,
+  require('./src/routes/customer/properties.route')
+);
+safeUse(
+  '/api/customer/summary',
+  auth,
+  requireTenantAccess,
+  require('./src/routes/customer/summary.route')
+);
+safeUse(
+  '/api/customer/tasks',
+  auth,
+  requireTenantAccess,
+  require('./src/routes/customer/tasks.route')
+);
+
 safeUse('/api/customer/autopay', require('./src/routes/customer/autopay.route'));
 // safeUse('/api/payments/paypal/webhook', require('./src/routes/payments/paypal.webhook.route'));
 safeUse('/api/users/me', require('./src/routes/users.me.route'));
 safeUse('/api/payroll', require('./src/routes/payroll.route'));
-safeUse("/api/receipts", require("./routes/receipts.routes"));
-
-
-
-
+safeUse("/api/internal/receipts/google-legacy", internalLegacyGmailReceiptsRoutes); // legacy internal only
+safeUse("/api/receipts/google", retailGmailReceiptsRoutes); // canonical retail tenant route
+safeUse("/api/general-data/google", generalDataGmailRoutes);
+safeUse("/api/business-intelligence/webhook", businessIntelligenceWebhookRoutes);
+safeUse("/api/business-intelligence", auth, requireTenantAccess, businessIntelligenceRoutes);
+safeUse("/api/receipts", auth, require("./routes/receipts.routes"));
 
 /* -------------------- Debug helpers -------------------- */
-app.get('/debug/properties', async (req, res) => {
+app.get('/debug/properties', blockDebugInProduction, async (req, res) => {
   try {
     const Property = require('./models/Property');
     const properties = await Property.find({});
@@ -324,7 +404,7 @@ app.get('/debug/properties', async (req, res) => {
   }
 });
 
-app.get('/__debug/wo-model', (req, res) => {
+app.get('/__debug/wo-model', blockDebugInProduction, (req, res) => {
   try {
     const M = require('./src/models/WarehouseOrder');
     const resolved = require.resolve('./src/models/WarehouseOrder');
@@ -440,16 +520,29 @@ const initializeDatabase = async () => {
     const User = require('./models/User');
     const Property = require('./models/Property');
 
-    const cleanerEmail = 'elite@gmail.com';
-    const customerEmail = 'john.smith@email.com';
-    const adminEmail = 'admin@gmail.com';
+    const cleanerEmail = process.env.SEED_CLEANER_EMAIL || "elite@example.com";
+    const customerEmail = process.env.SEED_CUSTOMER_EMAIL || "customer@example.com";
+    const adminEmail = process.env.ADMIN_EMAIL;
 
-    // hash once for each role (updateOne pre-save hooks don't run)
-    const hash = (pwd) => bcrypt.hash(pwd, 10);
+    const cleanerSeedPassword = process.env.CLEANER_SEED_PASSWORD;
+    const customerSeedPassword = process.env.CUSTOMER_SEED_PASSWORD;
+    const adminSeedPassword = process.env.ADMIN_SEED_PASSWORD;
+
+    if (
+      !adminEmail ||
+      !cleanerSeedPassword ||
+      !customerSeedPassword ||
+      !adminSeedPassword
+    ) {
+      console.log("⏭️ Skipping sample user seed: seed env vars missing");
+      return;
+    }
+
+    const hash = (pwd) => bcrypt.hash(pwd, 12);
     const [cleanerHash, customerHash, adminHash] = await Promise.all([
-      hash('1qaz!QAZ'),
-      hash('1qaz!QAZ'),
-      hash('admin123'),
+      hash(cleanerSeedPassword),
+      hash(customerSeedPassword),
+      hash(adminSeedPassword),
     ]);
 
     const upsertUser = async (query, doc) => {
@@ -595,6 +688,7 @@ const initializeDatabase = async () => {
 
 /* -------------------- Init (Vercel-safe) -------------------- */
 let _initPromise = null;
+let retailReceiptSchedulerStarted = false;
 
 const initApp = async () => {
   if (_initPromise) return _initPromise;
@@ -614,6 +708,27 @@ const initApp = async () => {
     // Mount the async-import routes
     // await mountESMRoutes(app);
     mountRoutes();
+    const schedulerBootFlag = String(process.env.RETAIL_AUTO_SCHEDULER_BOOT || "false").trim();
+    const schedulerEnabledFlag = String(process.env.RETAIL_AUTO_SCHEDULER_ENABLED || "false").trim();
+    const schedulerRunOnStartFlag = String(process.env.RETAIL_AUTO_SCHEDULER_RUN_ON_START || "false").trim();
+    const shouldBootRetailScheduler = schedulerBootFlag === "true";
+
+    if (!retailReceiptSchedulerStarted && shouldBootRetailScheduler) {
+      const schedulerStatus = startRetailReceiptScheduler();
+      retailReceiptSchedulerStarted = true;
+      console.log("[retail-scheduler]", {
+        boot: schedulerBootFlag,
+        enabled: schedulerEnabledFlag,
+        runOnStart: schedulerRunOnStartFlag,
+        status: schedulerStatus,
+      });
+    } else if (!retailReceiptSchedulerStarted) {
+      console.log("[retail-scheduler] boot skipped", {
+        boot: schedulerBootFlag,
+        enabled: schedulerEnabledFlag,
+        runOnStart: schedulerRunOnStartFlag,
+      });
+    }
 
 
     // customer messages (was after mount in your file)
@@ -621,12 +736,34 @@ const initApp = async () => {
 
     safeUse("/api/admin/messages", require("./src/routes/admin/messages.route"));
 
+    app.use((req, res) => {
+      return res.status(404).json({
+        ok: false,
+        error: "not_found",
+        message: "Route not found",
+        requestId: req.requestId || null,
+      });
+    });
+
     // error handler should be LAST
     app.use((err, req, res, next) => {
-      console.error("🔥 SERVER ERROR:", err.stack || err);
-      res.status(err.status || 500).json({
-        error: "Internal server error",
-        message: err.message,
+      const status = Number(err.status || err.statusCode || 500);
+      const expose = status >= 400 && status < 500;
+
+      if (status >= 500) {
+        console.error("🔥 SERVER ERROR:", {
+          requestId: req.requestId || null,
+          method: req.method,
+          path: req.originalUrl,
+          stack: err.stack || String(err),
+        });
+      }
+
+      return res.status(status).json({
+        ok: false,
+        error: expose ? (err.code || "request_failed") : "internal_error",
+        message: expose ? err.message : "Internal server error",
+        requestId: req.requestId || null,
         ...(process.env.NODE_ENV !== "production" ? { stack: err.stack } : {}),
       });
     });

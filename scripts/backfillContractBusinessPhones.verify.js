@@ -1,23 +1,16 @@
 // services/api/scripts/backfillContractBusinessPhones.verify.js
-const admin = require("firebase-admin");
-const path = require("path");
+const { loadLocalEnv } = require("../lib/loadLocalEnv");
+loadLocalEnv();
 
-const SA_PATH = process.env.GOOGLE_APPLICATION_CREDENTIALS || path.resolve(__dirname, "../serviceAccount.json");
-let sa = null;
-try { sa = require(SA_PATH); } catch (e) {}
+const { admin, ensureFirebaseAdmin } = require("../lib/firebaseAdminApp");
+ensureFirebaseAdmin();
 
+const db = admin.firestore();
 const PROJECT_ID =
   process.env.FIREBASE_PROJECT_ID ||
   process.env.GOOGLE_CLOUD_PROJECT ||
   process.env.GCLOUD_PROJECT ||
-  (sa && (sa.project_id || sa.projectId));
-
-if (sa) {
-  admin.initializeApp({ credential: admin.credential.cert(sa), projectId: PROJECT_ID || sa.project_id });
-} else {
-  admin.initializeApp({ credential: admin.credential.applicationDefault(), projectId: PROJECT_ID });
-}
-const db = admin.firestore();
+  admin.app().options.projectId;
 
 /* Seeded RNG (deterministic if SEED set) */
 function mulberry32(seed){let t=seed>>>0;return function(){t+=0x6D2B79F5;let r=Math.imul(t^(t>>>15),1|t);r^=r+Math.imul(r^(r>>>7),61|r);return((r^(r>>>14))>>>0)/4294967296;}}

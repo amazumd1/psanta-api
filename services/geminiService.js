@@ -1,16 +1,24 @@
-const { GoogleGenerativeAI } = require('@google/generative-ai');
-const Property = require('../models/Property');
-const Task = require('../models/Task');
-require('dotenv').config({ path: '../config.env' });
+const { loadLocalEnv } = require("../lib/loadLocalEnv");
+loadLocalEnv();
 
-class GeminiService {
+const { GoogleGenerativeAI } = require("@google/generative-ai");
+const Property = require("../models/Property");
+const Task = require("../models/Task");
+
+  class GeminiService {
   constructor() {
     const API_KEY = process.env.GEMINI_API_KEY;
-    if (!API_KEY) {
-      throw new Error('GEMINI_API_KEY environment variable is required');
+    this.isConfigured = Boolean(API_KEY);
+
+    if (this.isConfigured) {
+      this.genAI = new GoogleGenerativeAI(API_KEY);
+      this.model = this.genAI.getGenerativeModel({ model: 'gemini-2.5-flash' });
+    } else {
+      this.genAI = null;
+      this.model = null;
+      console.warn('GeminiService: GEMINI_API_KEY missing, AI routes will run in fallback mode.');
     }
-    this.genAI = new GoogleGenerativeAI(API_KEY);
-    this.model = this.genAI.getGenerativeModel({ model: 'gemini-2.5-flash' });
+
     this.useEnhancedMockData = false;
     // Store contexts by task ID instead of single shared context
     this.contexts = new Map();

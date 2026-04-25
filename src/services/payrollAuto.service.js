@@ -4,8 +4,8 @@
 // - Cloudinary: PDF upload (pdfUrl)
 // - NO EMAIL here (emailed: false) → front-end GmailAuth se bhejayega
 
-const admin = require('firebase-admin');
-const { FieldValue } = require('firebase-admin/firestore');
+const { admin, ensureFirebaseAdmin } = require("../../lib/firebaseAdminApp");
+const { FieldValue } = require("firebase-admin/firestore");
 
 const {
   getTaxRatesByState,
@@ -22,15 +22,7 @@ const { buildPaystubPdfBuffer } = require('./paystubPdf.service');
 const { cloudinary } = require('./cloudinary');
 
 function getDb() {
-  if (!process.env.FIREBASE_PROJECT_ID) {
-    throw new Error('FIREBASE_PROJECT_ID is required for payroll auto-run');
-  }
-  if (!admin.apps.length) {
-    admin.initializeApp({
-      credential: admin.credential.applicationDefault(),
-      projectId: process.env.FIREBASE_PROJECT_ID,
-    });
-  }
+  ensureFirebaseAdmin();
   return admin.firestore();
 }
 

@@ -1,7 +1,7 @@
 // services/api/models/Property.js
 const mongoose = require('mongoose');
 const { Schema } = mongoose;
-
+const { addTenantScope } = require('../lib/mongooseTenant');
 /* ---------- Room Tasks ---------- */
 const roomTaskSchema = new Schema(
   {
@@ -22,7 +22,7 @@ const roomTaskSchema = new Schema(
 const propertySchema = new Schema(
   {
     // optional legacy/business id (globally unique if present)
-    propertyId: { type: String, unique: true, sparse: true, trim: true },
+    propertyId: { type: String, index: true, sparse: true, trim: true },
 
     // external joins (optional)
     externalRef: { type: String, trim: true },
@@ -59,6 +59,18 @@ propertySchema.index({ externalRef: 1 });
 propertySchema.index({ address: 1, zip: 1 });
 propertySchema.index({ isActive: 1 });
 propertySchema.index({ customer: 1, createdAt: -1 });
+
+addTenantScope(propertySchema, {
+  extraIndexes: [
+    {
+      fields: { tenantId: 1, propertyId: 1 },
+      options: { unique: true, sparse: true },
+    },
+    {
+      fields: { tenantId: 1, customer: 1, createdAt: -1 },
+    },
+  ],
+});
 
 /* ---------- Virtuals / Helpers ---------- */
 propertySchema.virtual('fullAddress').get(function () {

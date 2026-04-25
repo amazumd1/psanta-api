@@ -1,5 +1,9 @@
-# flyctl launch added from .gitignore
-**\node_modules
-**\.env.local
-**\config.env
+node_modules
+.env
+.env.*
+config.env
+config.*.env
+serviceAccount.json
+serviceAccount*.json
+.secrets
 fly.toml
