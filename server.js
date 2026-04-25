@@ -139,37 +139,73 @@ app.use(cookieParser(process.env.COOKIE_SECRET || undefined));
 // app.options('/(.*)', cors(corsCfg));
 
 // --- CORS allowlist via env ---
-const DEV_PORTS = [3000, 3001, 3002, 3003, 3004, 3007, 3008, 5173, 5174, 5175, 5176];
-const DEV_ORIGINS = new Set(DEV_PORTS.flatMap(p => [
-  `http://localhost:${p}`, `http://127.0.0.1:${p}`
-]));
+// --- CORS allowlist via env ---
+const DEV_PORTS = [
+  3000, 3001, 3002, 3003, 3004, 3007, 3008,
+  5000, 5001,
+  5173, 5174, 5175, 5176,
+];
 
-// comma-separated list: https://your-front.vercel.app,https://your-warehouse.netlify.app
-const PROD_ALLOW = (process.env.CORS_ORIGINS || '')
-  .split(',')
-  .map((s) => s.trim().replace(/\/$/, ''))
-  .filter(Boolean);
+const DEV_ORIGINS = new Set(
+  DEV_PORTS.flatMap((p) => [
+    `http://localhost:${p}`,
+    `http://127.0.0.1:${p}`,
+  ])
+);
 
-const PROPERTY_SANTA_RE = /^https:\/\/([a-z0-9-]+\.)?propertysanta\.com$/i;
+function cleanOrigin(value) {
+  return String(value || '').trim().replace(/\/+$/, '');
+}
+
+const PROD_ALLOW = new Set(
+  String(process.env.CORS_ORIGINS || '')
+    .split(',')
+    .map(cleanOrigin)
+    .filter(Boolean)
+);
+
+const PROPERTY_SANTA_RE =
+  /^https:\/\/([a-z0-9-]+\.)?propertysanta\.com$/i;
 
 const VERCEL_PREVIEW_RE =
-  /^https:\/\/psanta-(ops|customer|api|warehouse|cleaner|admin)(?:-[a-z0-9-]+)?\.vercel\.app$/i;
+  /^https:\/\/psanta-(ops|customer|api|warehouse|cleaner|admin|frontpage)(?:-[a-z0-9-]+)?\.vercel\.app$/i;
 
 const corsCfg = {
-  origin: (origin, cb) => {
+  origin(origin, cb) {
     if (!origin) return cb(null, true);
 
-    const cleanOrigin = String(origin).trim().replace(/\/$/, '');
+    const clean = cleanOrigin(origin);
 
-    if (DEV_ORIGINS.has(cleanOrigin)) return cb(null, true);
-    if (PROD_ALLOW.includes(cleanOrigin)) return cb(null, true);
-    if (PROPERTY_SANTA_RE.test(cleanOrigin)) return cb(null, true);
-    if (VERCEL_PREVIEW_RE.test(cleanOrigin)) return cb(null, true);
+    if (DEV_ORIGINS.has(clean)) return cb(null, true);
+    if (PROD_ALLOW.has(clean)) return cb(null, true);
+    if (PROPERTY_SANTA_RE.test(clean)) return cb(null, true);
+    if (VERCEL_PREVIEW_RE.test(clean)) return cb(null, true);
 
+    console.warn('CORS blocked:', clean);
     return cb(null, false);
   },
+
   credentials: true,
-  exposedHeaders: ['Content-Length', 'Content-Type', 'Idempotency-Key'],
+
+  methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+
+  allowedHeaders: [
+    'Content-Type',
+    'Authorization',
+    'authorization',
+    'x-auth-token',
+    'X-Requested-With',
+    'Idempotency-Key',
+    'idempotency-key',
+    'x-tenant-id',
+  ],
+
+  exposedHeaders: [
+    'Content-Length',
+    'Content-Type',
+    'Idempotency-Key',
+  ],
+
   maxAge: 600,
 };
 
