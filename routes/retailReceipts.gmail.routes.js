@@ -3686,11 +3686,73 @@ async function runRetailGmailSyncForOwner({
     const nextHistoryId =
         String(gmailProfile.historyId || "").trim() || savedLastHistoryId;
 
+    async function verifyRetailReceiptRowsVisible(retailOwnerId, matchedMessages = []) {
+        const db = getFirestore();
+
+        const candidateRawIds = uniqueNonEmpty(
+            (Array.isArray(matchedMessages) ? matchedMessages : []).flatMap((message) => [
+                String(message?.gmailId || "").trim(),
+                String(message?.messageId || "").trim().replace(/^<|>$/g, ""),
+            ])
+        ).slice(0, 80);
+
+        if (!candidateRawIds.length) {
+            return {
+                checked: 0,
+                visible: 0,
+                missingSample: [],
+                ok: true,
+            };
+        }
+
+        const snaps = await Promise.all(
+            candidateRawIds.map((rawId) =>
+                retailReceiptDoc(db, retailOwnerId, rawId)
+                    .get()
+                    .catch((err) => ({
+                        exists: false,
+                        __verifyError: err?.message || "verify_failed",
+                    }))
+            )
+        );
+
+        const visible = snaps.filter((snap) => snap?.exists).length;
+        const missingSample = candidateRawIds
+            .filter((_, index) => !snaps[index]?.exists)
+            .slice(0, 10);
+
+        return {
+            checked: candidateRawIds.length,
+            visible,
+            missingSample,
+            ok: visible > 0,
+        };
+    }
+
+    const receiptVisibility = matchedMessages.length
+        ? await verifyRetailReceiptRowsVisible(retailOwnerId, matchedMessages).catch((err) => ({
+            checked: 0,
+            visible: 0,
+            missingSample: [],
+            ok: false,
+            error: err?.message || "receipt_visibility_verify_failed",
+        }))
+        : {
+            checked: 0,
+            visible: 0,
+            missingSample: [],
+            ok: true,
+        };
+
+    const hasVisibleReceiptRows =
+        matchedMessages.length === 0 || Number(receiptVisibility.visible || 0) > 0;
+
     const cursorAdvanceAllowed =
         !dry &&
         gasJson?.ok !== false &&
         Number(gasJson?.writeErrors || 0) === 0 &&
-        !String(gasJson?.error || "").trim();
+        !String(gasJson?.error || "").trim() &&
+        hasVisibleReceiptRows;
 
     const nextLastSyncCursorIso = cursorAdvanceAllowed
         ? syncStartedAtIso
@@ -3889,17 +3951,19 @@ async function runRetailGmailSyncForOwner({
             ? "gmail_query_or_empty_window"
             : matchedMessages.length === 0
                 ? "allowlist_filtered_all_messages"
-                : messageErrors > 0
-                    ? "apps_script_message_processing"
-                    : writeErrors > 0
-                        ? "apps_script_firestore_write"
-                        : parseFailed > 0 && writeCount === 0
-                            ? "parser_to_failure_queue"
-                            : writeCount > 0
-                                ? "none"
-                                : labelError
-                                    ? "gmail_label_apply"
-                                    : "unknown_zero_write";
+                : !hasVisibleReceiptRows
+                    ? "apps_script_wrong_firestore_path_or_live_env"
+                    : messageErrors > 0
+                        ? "apps_script_message_processing"
+                        : writeErrors > 0
+                            ? "apps_script_firestore_write"
+                            : parseFailed > 0 && writeCount === 0
+                                ? "parser_to_failure_queue"
+                                : writeCount > 0
+                                    ? "none"
+                                    : labelError
+                                        ? "gmail_label_apply"
+                                        : "unknown_zero_write";
 
     const cursorPayload = {
         mode: timePlan.mode,
@@ -3948,6 +4012,7 @@ async function runRetailGmailSyncForOwner({
                 : [],
         },
         labelsApplied,
+        receiptVisibility,
         cursor: cursorPayload,
         warnings,
         syncPlan: {
@@ -3977,6 +4042,7 @@ async function runRetailGmailSyncForOwner({
         queries: debug ? queries : [],
         cursor: cursorPayload,
         labelsApplied,
+        receiptVisibility,
         gas: gasJson,
         likelyBlocker,
         diagnostics,
