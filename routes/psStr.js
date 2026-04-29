@@ -42,6 +42,82 @@ function zip3FromAny(zip) {
     return s.length === 3 ? s : "";
 }
 
+const IMAGE_PROXY_ALLOWED_HOSTS = new Set([
+    "a0.muscache.com",
+    "a1.muscache.com",
+    "a2.muscache.com",
+    "a3.muscache.com",
+    "images.unsplash.com",
+    "res.cloudinary.com",
+]);
+
+function isAllowedProxyImageUrl(raw) {
+    try {
+        const u = new URL(String(raw || "").trim());
+        if (!["http:", "https:"].includes(u.protocol)) return false;
+        return IMAGE_PROXY_ALLOWED_HOSTS.has(u.hostname.toLowerCase());
+    } catch {
+        return false;
+    }
+}
+
+/* -------------------- GET /image-proxy --------------------
+ * Same-origin image proxy for external listing photos.
+ * /api/ps/str/image-proxy?url=https%3A%2F%2Fa0.muscache.com%2F...
+ */
+router.get("/image-proxy", authOptional, async (req, res) => {
+    try {
+        const rawUrl = String(req.query?.url || "").trim();
+
+        if (!rawUrl || !isAllowedProxyImageUrl(rawUrl)) {
+            return res.status(400).json({ ok: false, error: "invalid_image_url" });
+        }
+
+        const upstream = await fetch(rawUrl, {
+            method: "GET",
+            headers: {
+                "User-Agent":
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36",
+                "Accept": "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
+                "Referer": "https://www.airbnb.com/",
+            },
+        });
+
+        if (!upstream.ok) {
+            return res.status(upstream.status).json({
+                ok: false,
+                error: "image_fetch_failed",
+                status: upstream.status,
+            });
+        }
+
+        const contentType = upstream.headers.get("content-type") || "image/jpeg";
+
+        if (!/^image\//i.test(contentType)) {
+            return res.status(415).json({
+                ok: false,
+                error: "not_an_image",
+                contentType,
+            });
+        }
+
+        const buf = Buffer.from(await upstream.arrayBuffer());
+
+        res.setHeader("Content-Type", contentType);
+        res.setHeader("Cache-Control", "public, max-age=86400, stale-while-revalidate=604800");
+        res.setHeader("Cross-Origin-Resource-Policy", "cross-origin");
+
+        return res.end(buf);
+    } catch (e) {
+        console.error("GET /ps/str/image-proxy error:", e);
+        return res.status(500).json({
+            ok: false,
+            error: "image_proxy_error",
+            message: String(e?.message || e),
+        });
+    }
+});
+
 router.post("/extract_public", authOptional, async (req, res) => {
     try {
         const url = req.body?.url || req.body?.link;
@@ -844,6 +920,74 @@ router.get("/listings/byZip3", authOptional, async (req, res) => {
     } catch (e) {
         console.error("GET /ps/str/listings/byZip3 error:", e);
         return res.status(500).json({ ok: false, error: "server_error", message: String(e?.message || e) });
+    }
+});
+
+/* -------------------- GET /listings/collection --------------------
+ * Public collection feed for the site.
+ * /api/ps/str/listings/collection?limit=80&zip3=330&q=beach
+ */
+router.get("/listings/collection", authOptional, async (req, res) => {
+    try {
+        if (!StrListing) {
+            return res.status(501).json({ ok: false, error: "model_missing" });
+        }
+
+        const limit = Math.max(1, Math.min(120, Number(req.query?.limit || 80)));
+        const zip3 = zip3FromAny(req.query?.zip3 || "");
+        const qRaw = String(req.query?.q || "").trim();
+
+        const query = { published: true };
+
+        if (zip3) query.zip3 = zip3;
+
+        if (qRaw) {
+            const rx = new RegExp(qRaw.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i");
+            query.$or = [
+                { public_title: rx },
+                { public_preview: rx },
+                { zip: rx },
+                { zip3: rx },
+            ];
+        }
+
+        const rows = await StrListing.find(query)
+            .sort({ publishedAt: -1, updatedAt: -1, createdAt: -1 })
+            .limit(limit)
+            .lean();
+
+        const items = rows.map((d) => {
+            const photos = Array.isArray(d.photos)
+                ? d.photos
+                    .map((p) => typeof p === "string" ? p : p?.url)
+                    .filter(Boolean)
+                    .slice(0, 8)
+                : [];
+
+            const cover = d.cover_url || photos[0] || "";
+
+            return {
+                listing_id: d.listing_id,
+                zip3: d.zip3 || "",
+                zip: d.zip || "",
+                cover_url: cover,
+                photos,
+                photo_count: Array.isArray(d.photos) ? d.photos.length : photos.length,
+                public_title: d.public_title || "Property listing",
+                public_preview: d.public_preview || "",
+                publishedAt: d.publishedAt || null,
+                updatedAt: d.updatedAt || null,
+            };
+        });
+
+        return res.json({ ok: true, count: items.length, items });
+    } catch (e) {
+        console.error("GET /ps/str/listings/collection error:", e);
+        return res.status(500).json({
+            ok: false,
+            error: "server_error",
+            message: String(e?.message || e),
+        });
     }
 });
 
