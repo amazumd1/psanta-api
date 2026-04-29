@@ -1,0 +1,5 @@
+[
+  { "ingredient": "Ceremonial Matcha", "stock": 2300, "unit": "g", "reorderAt": 400 },
+  { "ingredient": "Oat Cream", "stock": 12000, "unit": "ml", "reorderAt": 2000 },
+  { "ingredient": "Cloud Meringue", "stock": 4300, "unit": "g", "reorderAt": 600 }
+]

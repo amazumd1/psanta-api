@@ -1,0 +1,17 @@
+[
+  {
+    "id": "A1",
+    "name": "Matcha Cloud",
+    "category": "Signature Dessert",
+    "status": "Active",
+    "basePrice": 12.5,
+    "variants": ["Classic", "Zero Sugar", "Coconut Foam"],
+    "ingredients": [
+      { "name": "Ceremonial Matcha", "qty": "5g" },
+      { "name": "Oat Cream", "qty": "80ml" },
+      { "name": "Cloud Meringue", "qty": "30g" }
+    ],
+    "motionPreset": "Spiral Bloom",
+    "media": ["hero-a1.jpg", "prep-a1.mp4"]
+  }
+]
