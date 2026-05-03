@@ -333,6 +333,7 @@ app.use("/api/uploads", auth, require("./routes/cloudinary.upload"));
 app.use("/api/finance", auth, require("./routes/finance.transactions"));
 app.use("/api/pc/str", require("./routes/psStr")); // frontend fallbacks
 app.use('/api/pc', require('./routes/pc'));
+app.use("/api/ics", require("./src/routes/ics.route"));
 
 // app.use("/api/ps/str", psStr);          // ✅ ADD THIS (before /api/ps)
 app.use("/api/ps", require("./routes/pc"));
