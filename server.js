@@ -316,6 +316,8 @@ const businessRoutes = require("./routes/business.routes");
 const workspaceRoutes = require("./routes/workspace.routes");
 const billingRoutes = require("./routes/billing.routes");
 
+console.log("✅ Mounting pricing routes from:", require.resolve("./routes/pricing.routes"));
+
 app.use('/api/auth', authLimiter, authRoutes);
 app.use('/api/tasks', auth, requireTenantAccess, taskRoutes);
 app.use('/api/ai', aiRoutes);
@@ -334,6 +336,7 @@ app.use("/api/finance", auth, require("./routes/finance.transactions"));
 app.use("/api/pc/str", require("./routes/psStr")); // frontend fallbacks
 app.use('/api/pc', require('./routes/pc'));
 app.use("/api/ics", require("./src/routes/ics.route"));
+
 
 // app.use("/api/ps/str", psStr);          // ✅ ADD THIS (before /api/ps)
 app.use("/api/ps", require("./routes/pc"));

@@ -20,6 +20,7 @@ const Counter = require('../../models/Counter');
 const { requireRole } = require('../../../middleware/roles');
 const mongoose = require('mongoose');
 const { getFirestore, serverTimestamp } = require('../../../lib/firebaseAdminApp');
+const { getValidLockedQuote } = require('../../../lib/marketGuardrailPricing');
 function resolveTenantId(req) {
   return String(
     req.tenantId ||
@@ -526,7 +527,7 @@ router.post("/create-order", async (req, res, next) => {
 
     const createRes = await client.execute(request);
 
-    const quoteHash = makeQuoteHash({ propertyId, amount });
+    const quoteHash = quote?.quoteHash || makeQuoteHash({ propertyId, amount, quoteId });
     await Payment.create({
       tenantId,
       type: "one_time",
@@ -543,10 +544,25 @@ router.post("/create-order", async (req, res, next) => {
       ).trim().toLowerCase() || undefined,
       quoteHash,
       paypal: { orderId: createRes.result.id, rawCreateResponse: createRes.result },
-      cart: req.body?.cart || null,
-      status: "created",
-      profitChannel: profitChannel || "customer",
-    });
+cart: {
+  ...(req.body?.cart || {}),
+  pricingQuote: quote ? {
+    quoteId: quote.quoteId,
+    total: quote.total,
+    expiresAt: quote.expiresAt,
+    breakdown: quote.breakdown,
+    marketProfileSnapshot: quote.marketProfileSnapshot,
+  } : null,
+},
+status: "created",
+profitChannel: profitChannel || "customer",
+});
+
+if (quote) {
+  quote.status = 'used';
+  quote.usedAt = new Date();
+  await quote.save();
+}
 
     const approveUrl = (createRes.result.links || []).find(l => l.rel === 'approve')?.href;
     return res.json({ ok: true, orderID: createRes.result.id, approveUrl });

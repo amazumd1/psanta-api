@@ -9,6 +9,9 @@ router.post('/state', c.addState);
 router.delete('/state/:code', c.deleteState);
 router.patch('/state/:code', c.updateStatePatch);
 
+router.get('/market-rates', c.listMarketRates);
+router.put('/market-rates', c.upsertMarketRate);
+
 router.post('/quote', c.quote);
 
 module.exports = router;
