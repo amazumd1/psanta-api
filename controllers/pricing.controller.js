@@ -3,6 +3,7 @@ const PricingConfig = require('../models/PricingConfig');
 const { computeQuote } = require('../lib/quote');
 const MarketRateProfile = require('../models/MarketRateProfile');
 const { createLockedQuote } = require('../lib/marketGuardrailPricing');
+const { suggestMarketRateFromGoogle, suggestMarketRatesBatch } = require('../lib/googleMarketSuggestions');
 
 function normalizeStatesWithCodes(inputStates = {}) {
   const states = { ...inputStates };
@@ -156,6 +157,32 @@ exports.updateStatePatch = async (req, res) => {
     return res.json({ ok: true, state: doc.states.get(code) });
   } catch (err) {
     return res.status(400).json({ ok: false, error: String(err.message || err) });
+  }
+};
+
+exports.suggestMarketRate = async (req, res) => {
+  try {
+    const suggestion = await suggestMarketRateFromGoogle(req.body || {});
+    return res.json(suggestion);
+  } catch (err) {
+    return res.status(err.status || 400).json({
+      ok: false,
+      error: err.code || 'MARKET_RATE_SUGGESTION_FAILED',
+      message: String(err.message || err),
+    });
+  }
+};
+
+exports.suggestMarketRatesBatch = async (req, res) => {
+  try {
+    const suggestion = await suggestMarketRatesBatch(req.body || {});
+    return res.json(suggestion);
+  } catch (err) {
+    return res.status(err.status || 400).json({
+      ok: false,
+      error: err.code || 'MARKET_RATE_BATCH_SUGGESTION_FAILED',
+      message: String(err.message || err),
+    });
   }
 };
 

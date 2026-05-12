@@ -21,6 +21,7 @@ const { requireRole } = require('../../../middleware/roles');
 const mongoose = require('mongoose');
 const { getFirestore, serverTimestamp } = require('../../../lib/firebaseAdminApp');
 const { getValidLockedQuote } = require('../../../lib/marketGuardrailPricing');
+const PricingQuote = require('../../../models/PricingQuote');
 function resolveTenantId(req) {
   return String(
     req.tenantId ||
@@ -69,6 +70,145 @@ async function computeEstimatedMonthlyOnServer({ propertyId, amountOverride }) {
   }
 
   return { amount: 800.99 }; // fallback for now
+}
+
+function money(value) {
+  const n = Number(value || 0);
+  return Number.isFinite(n) ? Math.round(n * 100) / 100 : 0;
+}
+
+function inferCheckoutVisits(body = {}) {
+  const cart = body.cart || {};
+  const schedule = Array.isArray(cart.schedule)
+    ? cart.schedule
+    : Array.isArray(body.schedule)
+      ? body.schedule
+      : [];
+
+  const fromSchedule = schedule.filter(Boolean).length;
+  const fromMonthly = Number(body.monthlyVisits || cart.monthlyVisits || 0);
+  return Math.max(1, fromSchedule || (Number.isFinite(fromMonthly) ? Math.round(fromMonthly) : 0) || 1);
+}
+
+function getMultiVisitDiscountPct(visits = 1) {
+  const n = Number(visits || 1);
+  const tiers = [
+    { min: 4, percent: 5 },
+    { min: 8, percent: 7 },
+    { min: 12, percent: 10 },
+  ];
+
+  let pct = 0;
+  for (const tier of tiers) {
+    if (n >= tier.min) pct = tier.percent;
+  }
+  return pct;
+}
+
+function computeLockedQuoteCleaningTotal(quote, visits = 1) {
+  const perVisit = money(quote?.total);
+  const n = Math.max(1, Number(visits || 1));
+  const subtotal = money(perVisit * n);
+  const discountPct = getMultiVisitDiscountPct(n);
+  const discount = money(subtotal * (discountPct / 100));
+  const total = money(subtotal - discount);
+
+  return { perVisit, visits: n, subtotal, discountPct, discount, total };
+}
+
+function computeClientInventoryTotal(cart = {}) {
+  const items = Array.isArray(cart.inventoryItems) ? cart.inventoryItems : [];
+  const itemTotal = money(items.reduce((sum, it) => {
+    const qty = Math.max(0, Number(it?.qty || 1));
+    const unitPrice = Math.max(0, Number(it?.unitPrice ?? it?.price ?? 0));
+    return sum + (qty * unitPrice);
+  }, 0));
+
+  const fallback = money(cart.inventoryAmount || 0);
+  return itemTotal > 0 ? itemTotal : fallback;
+}
+
+async function resolveCheckoutPricing({ tenantId, propertyId, body = {} }) {
+  const { quoteId, priceLockToken, amountOverride } = body || {};
+  const hasQuoteFields = !!quoteId || !!priceLockToken;
+
+  if (hasQuoteFields && (!quoteId || !priceLockToken)) {
+    const err = new Error('quoteId and priceLockToken are both required');
+    err.status = 400;
+    err.code = 'QUOTE_LOCK_INCOMPLETE';
+    throw err;
+  }
+
+  if (!hasQuoteFields) {
+    const legacy = await computeEstimatedMonthlyOnServer({ propertyId, amountOverride });
+    return {
+      amount: legacy.amount,
+      reason: legacy.reason,
+      quote: null,
+      pricingQuoteSnapshot: null,
+      pricingMode: 'legacy_amount_override',
+    };
+  }
+
+  // const quote = await getValidLockedQuote({ quoteId, priceLockToken, tenantId });
+  // if (!quote) {
+  //   const err = new Error('The locked quote is missing, expired, or already used. Please refresh pricing and try again.');
+  //   err.status = 409;
+  //   err.code = 'QUOTE_LOCK_INVALID_OR_EXPIRED';
+  //   throw err;
+  // }
+
+  // if (quote.propertyId && propertyId && String(quote.propertyId) !== String(propertyId)) {
+
+  const quote = await getValidLockedQuote({ quoteId, priceLockToken, tenantId });
+  if (!quote) {
+    const err = new Error('The locked quote is missing, expired, or already used. Please refresh pricing and try again.');
+    err.status = 409;
+    err.code = 'QUOTE_LOCK_INVALID_OR_EXPIRED';
+    throw err;
+  }
+
+  const fallbackQuote =
+    !!quote.marketProfileSnapshot?.isFallback ||
+    (Array.isArray(quote.breakdown?.sources) && quote.breakdown.sources.includes('fallback_seed'));
+
+  if (fallbackQuote) {
+    const err = new Error('AI local market verification is still pending for this ZIP/service. Please refresh pricing or contact support.');
+    err.status = 409;
+    err.code = 'AI_MARKET_RATE_VERIFICATION_PENDING';
+    throw err;
+  }
+
+  if (quote.propertyId && propertyId && String(quote.propertyId) !== String(propertyId)) {
+    const err = new Error('Locked quote does not match this checkout property.');
+    err.status = 409;
+    err.code = 'QUOTE_PROPERTY_MISMATCH';
+    throw err;
+  }
+
+  const cart = body.cart || {};
+  const visits = inferCheckoutVisits(body);
+  const cleaning = computeLockedQuoteCleaningTotal(quote, visits);
+  const inventoryAmount = computeClientInventoryTotal(cart);
+  const amount = money(cleaning.total + inventoryAmount);
+
+  return {
+    amount,
+    reason: null,
+    quote,
+    pricingMode: visits > 1 ? 'locked_quote_multi_visit' : 'locked_quote_single_visit',
+    pricingQuoteSnapshot: {
+      quoteId: quote.quoteId,
+      total: quote.total,
+      currency: quote.currency || 'USD',
+      expiresAt: quote.expiresAt,
+      breakdown: quote.breakdown,
+      marketProfileSnapshot: quote.marketProfileSnapshot,
+      cleaning,
+      inventoryAmount,
+      amount,
+    },
+  };
 }
 
 // Atomically allocate a block of sequential IDs
@@ -492,14 +632,34 @@ router.post("/create-order", async (req, res, next) => {
     const {
       propertyId,
       userId,
-      amountOverride,
       profitChannel,
       cart,
       customerEmail,
     } = req.body || {};
-    const { amount, reason } = await computeEstimatedMonthlyOnServer({ propertyId, amountOverride });
 
     if (!propertyId) return res.status(400).json({ ok: false, error: 'propertyId required' });
+
+    let amount;
+    let reason;
+    let quote = null;
+    let pricingMode = 'legacy_amount_override';
+    let pricingQuoteSnapshot = null;
+
+    try {
+      const resolvedPricing = await resolveCheckoutPricing({ tenantId, propertyId, body: req.body || {} });
+      amount = resolvedPricing.amount;
+      reason = resolvedPricing.reason;
+      quote = resolvedPricing.quote;
+      pricingMode = resolvedPricing.pricingMode;
+      pricingQuoteSnapshot = resolvedPricing.pricingQuoteSnapshot;
+    } catch (pricingErr) {
+      return res.status(pricingErr.status || 400).json({
+        ok: false,
+        error: pricingErr.code || 'QUOTE_LOCK_INVALID',
+        message: pricingErr.message,
+      });
+    }
+
     if (!amount || amount <= 0) {
       return res.status(400).json({ ok: false, error: 'PRICE_NOT_AVAILABLE', reason });
     }
@@ -527,7 +687,7 @@ router.post("/create-order", async (req, res, next) => {
 
     const createRes = await client.execute(request);
 
-    const quoteHash = quote?.quoteHash || makeQuoteHash({ propertyId, amount, quoteId });
+    const quoteHash = quote?.quoteHash || makeQuoteHash({ propertyId, amount, pricingMode });
     await Payment.create({
       tenantId,
       type: "one_time",
@@ -544,28 +704,25 @@ router.post("/create-order", async (req, res, next) => {
       ).trim().toLowerCase() || undefined,
       quoteHash,
       paypal: { orderId: createRes.result.id, rawCreateResponse: createRes.result },
-cart: {
-  ...(req.body?.cart || {}),
-  pricingQuote: quote ? {
-    quoteId: quote.quoteId,
-    total: quote.total,
-    expiresAt: quote.expiresAt,
-    breakdown: quote.breakdown,
-    marketProfileSnapshot: quote.marketProfileSnapshot,
-  } : null,
-},
-status: "created",
-profitChannel: profitChannel || "customer",
-});
-
-if (quote) {
-  quote.status = 'used';
-  quote.usedAt = new Date();
-  await quote.save();
-}
+      cart: {
+        ...(req.body?.cart || {}),
+        pricingMode,
+        pricingQuote: pricingQuoteSnapshot,
+        serverAmount: amount,
+      },
+      status: "created",
+      profitChannel: profitChannel || "customer",
+    });
 
     const approveUrl = (createRes.result.links || []).find(l => l.rel === 'approve')?.href;
-    return res.json({ ok: true, orderID: createRes.result.id, approveUrl });
+    return res.json({
+      ok: true,
+      orderID: createRes.result.id,
+      approveUrl,
+      amount,
+      pricingMode,
+      quoteId: quote?.quoteId || null,
+    });
   } catch (e) { next(e); }
 });
 
@@ -646,6 +803,20 @@ router.post("/capture-order", async (req, res) => {
       saved = await Payment.findByIdAndUpdate(payDoc._id, { $set: base }, { new: true });
     } else {
       saved = await (new Payment(base)).save();
+    }
+
+    if (String(status || '').toLowerCase() === 'completed') {
+      const capturedQuoteId = cart?.pricingQuote?.quoteId;
+      if (capturedQuoteId) {
+        try {
+          await PricingQuote.updateOne(
+            { tenantId, quoteId: String(capturedQuoteId), status: 'quoted' },
+            { $set: { status: 'used', usedAt: new Date() } }
+          );
+        } catch (e) {
+          console.warn('capture-order: mark pricing quote used failed:', e.message);
+        }
+      }
     }
 
     // --- User linking (prefer existing → then by payer email) ---

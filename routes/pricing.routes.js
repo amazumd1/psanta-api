@@ -11,6 +11,8 @@ router.patch('/state/:code', c.updateStatePatch);
 
 router.get('/market-rates', c.listMarketRates);
 router.put('/market-rates', c.upsertMarketRate);
+router.post('/market-rates/suggest', c.suggestMarketRate);
+router.post('/market-rates/suggest-batch', c.suggestMarketRatesBatch);
 
 router.post('/quote', c.quote);
 
