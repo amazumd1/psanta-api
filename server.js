@@ -14,6 +14,7 @@ const { firebaseAuth, requireOpsAdmin } = require("./middleware/firebaseAuth");
 const inviteRoutes = require("./routes/invite.routes");
 const { loadLocalEnv } = require("./lib/loadLocalEnv");
 const { assertRuntimeEnv } = require("./lib/runtimeGuard");
+const startHereAiRoutes = require('./routes/startHereAi');
 
 loadLocalEnv();
 assertRuntimeEnv();
@@ -321,6 +322,7 @@ console.log("✅ Mounting pricing routes from:", require.resolve("./routes/prici
 app.use('/api/auth', authLimiter, authRoutes);
 app.use('/api/tasks', auth, requireTenantAccess, taskRoutes);
 app.use('/api/ai', aiRoutes);
+app.use('/api/start-here-ai', startHereAiRoutes);
 app.use('/api/properties', auth, propertyRoutes);
 app.use('/api/users', userRoutes);
 app.use("/api/business", auth, requireTenantAccess, businessRoutes);
