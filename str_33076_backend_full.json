@@ -1,0 +1,119 @@
+﻿{
+    "ok":  true,
+    "zip":  "33076",
+    "service":  "turnover_clean",
+    "provider":  "tavily",
+    "enrichment":  {
+                       "provider":  "firecrawl",
+                       "attempted":  2,
+                       "succeeded":  2,
+                       "failed":  0,
+                       "failures":  [
+
+                                    ]
+                   },
+    "suggested":  null,
+    "confidence":  0,
+    "sourceCount":  8,
+    "reviewStatus":  "no_price_evidence",
+    "canAutoApprove":  false,
+    "safeToAutoSave":  false,
+    "status":  "review_required",
+    "pricingSource":  "ai_search_incomplete",
+    "quality":  {
+                    "sourceCount":  0,
+                    "vendorCount":  0,
+                    "marketplaceCount":  0,
+                    "socialCount":  0,
+                    "wrongCityCount":  0,
+                    "mixedLocationCount":  0,
+                    "exactLocationCount":  0,
+                    "tierACount":  0,
+                    "tierBCount":  0,
+                    "tierCCount":  0,
+                    "tierDCount":  0,
+                    "tierECount":  0,
+                    "primaryConsensusCount":  0,
+                    "costFloorCount":  0,
+                    "serviceMismatchCount":  0,
+                    "outlierCount":  0,
+                    "broadGuideCount":  0,
+                    "rejectedSignalCount":  0,
+                    "totalWeight":  0
+                },
+    "queries":  [
+                    "33076 Airbnb cleaning service pricing -jobs -salary -wage -hiring -checklist",
+                    "33076 Airbnb cleaning fee cleaning company -jobs -salary -wage -hiring -checklist",
+                    "33076 vacation rental cleaning service rates -jobs -salary -wage -hiring -checklist"
+                ],
+    "evidence":  [
+                     {
+                         "domain":  "m.yelp.com",
+                         "title":  "TOP 10 BEST Building Cleaning near Pompano Beach, FL 33076 ...",
+                         "url":  "https://m.yelp.com/search?find_desc=Building+Cleaning\u0026find_loc=Parkland%2C+FL+33076",
+                         "snippet":  "Best Building Cleaning near Pompano Beach, FL 33076 ; ProJani Solutions · Office Cleaning. 40.3 mi · Miami, FL 33109 ; A B C International Cleaning Services.",
+                         "extractedPrice":  null,
+                         "query":  "33076 Airbnb cleaning service pricing -jobs -salary -wage -hiring -checklist"
+                     },
+                     {
+                         "domain":  "facebook.com",
+                         "title":  "ROMO Cleaning Services Busy life? Need a deep clean? Or a ...",
+                         "url":  "https://www.facebook.com/groups/VictorMJaramillo/posts/8821301147888575/",
+                         "snippet":  "We provide professional cleaning services for homes, businesses, and even Airbnb properties! Our services include deep cleaning, recurring cleaning, post-",
+                         "extractedPrice":  null,
+                         "query":  "33076 Airbnb cleaning service pricing -jobs -salary -wage -hiring -checklist"
+                     },
+                     {
+                         "domain":  "vacationacplan.com",
+                         "title":  "X3M PRO — HVAC Protection Plans for Airbnb \u0026 Short-Term Rental ...",
+                         "url":  "https://www.vacationacplan.com/",
+                         "snippet":  "All-inclusive HVAC service plans for Airbnb, VRBO, and short-term rental properties. Fast response, parts \u0026 labor coverage, predictable monthly pricing.",
+                         "extractedPrice":  null,
+                         "query":  "33076 Airbnb cleaning service pricing -jobs -salary -wage -hiring -checklist"
+                     },
+                     {
+                         "domain":  "spotless-co.com",
+                         "title":  "Home -",
+                         "url":  "https://spotless-co.com/",
+                         "snippet":  "Get a free estimate and book in 60 seconds to transform your home today. ### About Us. With Spotless Co. we strive for quick, efficient, and painless service to Coral Springs and Parkland residents. We offer recurring cleaning, same day cle",
+                         "extractedPrice":  null,
+                         "query":  "33076 Airbnb cleaning service pricing -jobs -salary -wage -hiring -checklist"
+                     },
+                     {
+                         "domain":  "yelp.com",
+                         "title":  "THE BEST 10 HOME CLEANING IN CORAL SPRINGS, FL - Yelp",
+                         "url":  "https://www.yelp.com/search?cflt=homecleaning\u0026find_loc=Coral+Springs%2C+FL\u0026start=80",
+                         "snippet":  "These are the best home deep cleaning in Coral Springs, FL: Carvalhos Cleaning · KM Cleaning Services · Nice n Clean · Coral Cleaning Company. People also liked",
+                         "extractedPrice":  null,
+                         "query":  "33076 Airbnb cleaning service pricing -jobs -salary -wage -hiring -checklist"
+                     },
+                     {
+                         "domain":  "sparklygroup.services",
+                         "title":  "Airbnb Cleaning Services near me - Sparkly Group",
+                         "url":  "https://www.sparklygroup.services/airbnb-cleaning/",
+                         "snippet":  "We offer cleaning services in Broward, Palm Beach and Miami-Dade counties. We are located in Miami FLorida, and travel to different locations within these",
+                         "extractedPrice":  null,
+                         "query":  "33076 Airbnb cleaning fee cleaning company -jobs -salary -wage -hiring -checklist"
+                     },
+                     {
+                         "domain":  "gallasroyalcleaning.com",
+                         "title":  "Airbnb Cleaning Service Coral Springs, FL | Gallas Royal Cleaning",
+                         "url":  "https://gallasroyalcleaning.com/airbnb-cleaning-coral-springs-fl.html",
+                         "snippet":  "Office Cleaning Deep Cleaning Move Out Cleaning Move In Cleaning Post Construction Commercial Cleaning Regular Cleaning Airbnb Cleaning. # Airbnb \u0026 Vacation Rental Cleaning in Coral Springs. Maximize your rental reviews with our specialized",
+                         "extractedPrice":  null,
+                         "query":  "33076 Airbnb cleaning fee cleaning company -jobs -salary -wage -hiring -checklist"
+                     },
+                     {
+                         "domain":  "sweetmaidcleaning.com",
+                         "title":  "Top Airbnb Cleaning Services in Coral Springs, FL | Sweet Maid",
+                         "url":  "https://sweetmaidcleaning.com/coral-springs-fl/airbnb-cleaning/",
+                         "snippet":  "Sweet Maid Cleaning Service - Coral Springs, FL - Top Airbnb Cleaning Services in Coral Springs, FL. Sweet Maid - Top Airbnb Cleaning Services in Coral Springs, FL Sweet Maid. # Airbnb Cleaning Services in Coral Springs, FL. Leading house c",
+                         "extractedPrice":  null,
+                         "query":  "33076 Airbnb cleaning fee cleaning company -jobs -salary -wage -hiring -checklist"
+                     }
+                 ],
+    "rejectedPriceSignals":  [
+
+                             ],
+    "notes":  "Search completed, but accepted consensus prices were not strong enough."
+}

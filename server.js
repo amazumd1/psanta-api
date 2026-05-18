@@ -339,6 +339,10 @@ app.use("/api/pc/str", require("./routes/psStr")); // frontend fallbacks
 app.use('/api/pc', require('./routes/pc'));
 app.use("/api/ics", require("./src/routes/ics.route"));
 
+// ✅ Public StartHere Santa AI chat endpoint used by frontPage/src/components/ai/StartHereChatbot.jsx
+// Frontend apiPost("/start-here-ai/chat") resolves to: /api/start-here-ai/chat
+safeUse("/api/start-here-ai", require("./routes/startHereAi"));
+
 
 // app.use("/api/ps/str", psStr);          // ✅ ADD THIS (before /api/ps)
 app.use("/api/ps", require("./routes/pc"));
@@ -435,7 +439,9 @@ safeUse("/api/receipts/google", retailGmailReceiptsRoutes); // canonical retail 
 safeUse("/api/general-data/google", generalDataGmailRoutes);
 safeUse("/api/business-intelligence/webhook", businessIntelligenceWebhookRoutes);
 safeUse("/api/business-intelligence", auth, requireTenantAccess, businessIntelligenceRoutes);
+
 safeUse("/api/receipts", auth, require("./routes/receipts.routes"));
+safeUse("/api/analytics", require("./routes/analytics.routes"));
 
 /* -------------------- Debug helpers -------------------- */
 app.get('/debug/properties', blockDebugInProduction, async (req, res) => {

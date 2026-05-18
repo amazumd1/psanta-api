@@ -227,9 +227,9 @@ exports.quote = async (req, res) => {
       },
       configQuote: configQuote
         ? {
-            total: configQuote.total,
-            breakdown: configQuote.breakdown,
-          }
+          total: configQuote.total,
+          breakdown: configQuote.breakdown,
+        }
         : null,
     });
   } catch (err) {
@@ -268,6 +268,18 @@ exports.upsertMarketRate = async (req, res) => {
       return res.status(400).json({ ok: false, error: 'service required' });
     }
 
+    const allowedStatus = ['verified', 'review_required', 'rejected'];
+    const requestedStatus = String(body.status || 'verified').trim();
+
+    const status = allowedStatus.includes(requestedStatus)
+      ? requestedStatus
+      : 'verified';
+
+    const pricingSource = String(
+      body.pricingSource ||
+      (status === 'verified' ? 'manual_admin_review' : 'ai_search_incomplete')
+    ).trim();
+
     const patch = {
       marketLow: Number(body.marketLow),
       marketMedian: Number(body.marketMedian),
@@ -279,9 +291,23 @@ exports.upsertMarketRate = async (req, res) => {
       confidence: Number(body.confidence ?? 0.35),
       sourceCount: Number(body.sourceCount ?? 1),
       sources: Array.isArray(body.sources)
-        ? body.sources.map(String).slice(0, 10)
+        ? body.sources.map(String).slice(0, 15)
         : ['manual_admin'],
       notes: String(body.notes || ''),
+
+      status,
+      pricingSource,
+      reviewStatus: String(body.reviewStatus || (status === 'verified' ? 'manual_verified' : 'needs_review')),
+      originalReviewStatus: String(body.originalReviewStatus || ''),
+      safeToAutoSave: !!body.safeToAutoSave,
+      canAutoApprove: !!body.canAutoApprove,
+
+      quality: body.quality && typeof body.quality === 'object' ? body.quality : {},
+      evidence: Array.isArray(body.evidence) ? body.evidence.slice(0, 20) : [],
+      rejectedPriceSignals: Array.isArray(body.rejectedPriceSignals) ? body.rejectedPriceSignals.slice(0, 20) : [],
+
+      verifiedAt: status === 'verified' ? new Date() : null,
+      reviewedAt: status === 'verified' ? new Date() : null,
     };
 
     for (const key of ['marketLow', 'marketMedian', 'marketHigh', 'cleanerPayoutFloor']) {
