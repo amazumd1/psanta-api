@@ -18,4 +18,7 @@ serviceAccount*.json
 
 .secrets/
 .vercel
-.runtime/
+.runtime/scripts/backups/
+uploads/
+scripts/backups/
+uploads/
