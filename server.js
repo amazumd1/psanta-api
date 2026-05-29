@@ -140,9 +140,10 @@ app.use(cookieParser(process.env.COOKIE_SECRET || undefined));
 // app.options('/(.*)', cors(corsCfg));
 
 // --- CORS allowlist via env ---
-// --- CORS allowlist via env ---
+
+
 const DEV_PORTS = [
-  3000, 3001, 3002, 3003, 3004, 3007, 3008,
+  3000, 3001, 3002, 3003, 3004, 3007, 3008, 3009,
   5000, 5001,
   5173, 5174, 5175, 5176,
 ];
@@ -222,7 +223,7 @@ app.post('/api/payments/paypal/webhook',
 
 /* -------------------- Body parsing -------------------- */
 app.use(express.json({ limit: '25mb' }));
-app.use(express.urlencoded({ extended: true }));
+app.use(express.urlencoded({ extended: true, limit: "25mb" }));
 
 /* -------------------- Static -------------------- */
 app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
@@ -442,6 +443,9 @@ safeUse("/api/business-intelligence", auth, requireTenantAccess, businessIntelli
 
 safeUse("/api/receipts", auth, require("./routes/receipts.routes"));
 safeUse("/api/analytics", require("./routes/analytics.routes"));
+// ✅ Robotics planner API — zero-dollar R1 stack (JSON plans for Blender/ROS2/Foxglove)
+safeUse("/api/robotics", require("./routes/robotics.routes"));
+safeUse("/api", require("./routes/searchbase.routes"));
 
 /* -------------------- Debug helpers -------------------- */
 app.get('/debug/properties', blockDebugInProduction, async (req, res) => {
@@ -501,6 +505,7 @@ const FRONTENDS = [
   { name: 'cleaner', kind: 'next', envPath: path.resolve(__dirname, '../../apps/cleaner/.env.local') },
   { name: 'customer', kind: 'next', envPath: path.resolve(__dirname, '../../apps/customer/.env.local') },
   { name: 'frontPage', kind: 'vite', envPath: path.resolve(__dirname, '../../apps/frontPage/.env.local') },
+  { name: 'robotics', kind: 'vite', envPath: path.resolve(__dirname, '../../apps/robotics/.env.local') },
   { name: 'warehouse', kind: 'vite', envPath: path.resolve(__dirname, '../../apps/warehouse/.env.local') },
   { name: 'ops-app', kind: 'vite', envPath: path.resolve(__dirname, '../../apps/ops-app/.env.local') },
 ];
