@@ -1,5 +1,6 @@
 const express = require("express");
 const path = require("path");
+const os = require("os");
 const fs = require("fs");
 const multer = require("multer");
 
@@ -13,8 +14,27 @@ const CuratedLook = require("../models/CuratedLook");
 
 const router = express.Router();
 
-const curatedAssetDir = path.join(__dirname, "..", "uploads", "curated-composer");
-fs.mkdirSync(curatedAssetDir, { recursive: true });
+const isServerlessRuntime = Boolean(
+    process.env.VERCEL ||
+    process.env.AWS_LAMBDA_FUNCTION_NAME ||
+    process.env.LAMBDA_TASK_ROOT
+);
+
+const uploadRootDir = isServerlessRuntime
+    ? path.join(os.tmpdir(), "propertysanta-uploads")
+    : path.join(__dirname, "..", "uploads");
+
+const curatedAssetDir = path.join(uploadRootDir, "curated-composer");
+
+try {
+    fs.mkdirSync(curatedAssetDir, { recursive: true });
+} catch (error) {
+    console.error("curated asset dir init failed", {
+        curatedAssetDir,
+        message: error?.message,
+        code: error?.code,
+    });
+}
 
 const ROOMGPT_THEME_COPY = {
     "modern-coastal":
@@ -204,7 +224,14 @@ function buildShopRoomProducts({ roomType, themeId, sourceUrl, sourceName, sourc
 
 const curatedAssetUpload = multer({
     storage: multer.diskStorage({
-        destination: (_req, _file, cb) => cb(null, curatedAssetDir),
+        destination: (_req, _file, cb) => {
+    try {
+        fs.mkdirSync(curatedAssetDir, { recursive: true });
+        cb(null, curatedAssetDir);
+    } catch (error) {
+        cb(error);
+    }
+},
         filename: (_req, file, cb) => {
             const ext = path.extname(file.originalname || "").toLowerCase() || ".png";
             const safeExt = [".png", ".jpg", ".jpeg", ".webp"].includes(ext) ? ext : ".png";
