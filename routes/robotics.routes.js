@@ -12,10 +12,27 @@ const ROBOTICS_ROOT = path.resolve(__dirname, "../../../robotics");
 const FOXGLOVE_TOPICS = [
   "/robot/pose",
   "/robot/path",
+  "/robot/live_work_markers",
   "/room/objects",
   "/room/zones",
+  "/room/boundary_markers",
+  "/room/object_markers",
+  "/room/zone_markers",
   "/task/current_step",
   "/task/waypoints",
+  "/task/waypoint_markers",
+  "/task/service_report",
+  "/manipulation/markers",
+  "/manipulation/current_action",
+  "/manipulation/gripper_state",
+  "/manipulation/task_result",
+  "/moveit_mtc/request",
+  "/propertysanta/manipulation_goals",
+  "/isaac_sim/scene_request",
+  "/isaac_sim/task_request",
+  "/isaac_lab/humanoid_task_request",
+  "/propertysanta/isaac_status",
+  "/isaac_sim/preview_markers",
 ];
 
 function ensureDir(dirPath) {
@@ -127,6 +144,9 @@ function normalizeRobotObject(payload = {}) {
     category: payload.category || type,
     pose: normalizePose(payload.pose || payload),
     size: payload.size || null,
+    manipulation: payload.manipulation && typeof payload.manipulation === "object"
+      ? { ...payload.manipulation }
+      : null,
     notes: payload.notes || "",
   };
 }
@@ -205,6 +225,8 @@ function normalizePhotoAnnotation(payload = {}, existing = null) {
 function normalizeTaskStep(payload = {}, index = 0) {
   const action = String(payload.action || "").trim();
   const target = String(payload.target || "").trim();
+  const placeTarget = String(payload.placeTarget || "").trim();
+  const surfaceTarget = String(payload.surfaceTarget || "").trim();
 
   if (!action) throw makeHttpError(400, "task step action is required");
   if (!target && action !== "return_home") throw makeHttpError(400, "task step target is required");
@@ -216,7 +238,17 @@ function normalizeTaskStep(payload = {}, index = 0) {
     label: payload.label || `${action} ${target || "home"}`.trim(),
     expectedDurationSec: Number.isFinite(Number(payload.expectedDurationSec))
       ? Number(payload.expectedDurationSec)
+      : Number.isFinite(Number(payload.durationSeconds))
+        ? Number(payload.durationSeconds)
+        : null,
+    durationSeconds: Number.isFinite(Number(payload.durationSeconds))
+      ? Number(payload.durationSeconds)
       : null,
+    placeTarget: placeTarget || undefined,
+    surfaceTarget: surfaceTarget || undefined,
+    grasp: payload.grasp && typeof payload.grasp === "object" ? { ...payload.grasp } : undefined,
+    manipulation: payload.manipulation && typeof payload.manipulation === "object" ? { ...payload.manipulation } : undefined,
+    successCriteria: Array.isArray(payload.successCriteria) ? payload.successCriteria : undefined,
     notes: payload.notes || "",
   };
 }
@@ -314,6 +346,7 @@ function normalizeRoom(payload = {}, existing = null) {
   };
 }
 
+
 function findRoomIndex(store, roomId) {
   return store.rooms.findIndex((item) => item.roomId === roomId);
 }
@@ -359,38 +392,228 @@ function buildRobotTaskPlan(room) {
     taskSequence: room.taskSequence || [],
     maintenanceInspectionTasks: room.maintenanceInspectionTasks || [],
     foxgloveTopics: FOXGLOVE_TOPICS,
+    validation: validateRobotPlan(room, { mode: "export" }),
   };
 }
 
-function validateRobotPlan(room) {
-  const issues = [];
 
-  issues.push(...validateDimensions(room.dimensions));
+function makeValidationIssue(severity, code, pathName, message, meta = {}) {
+  return {
+    severity,
+    code,
+    path: pathName,
+    message,
+    ...meta,
+  };
+}
 
-  const waypointKeys = Object.keys(room.waypoints || {});
-  if (!waypointKeys.includes("home")) issues.push("waypoints.home is required");
-  if (waypointKeys.length < 2) issues.push("at least one target waypoint besides home is required");
+function issueText(issue) {
+  if (!issue || typeof issue !== "object") return String(issue || "");
+  return issue.path ? `${issue.path}: ${issue.message}` : issue.message;
+}
 
-  if (!Array.isArray(room.taskSequence) || room.taskSequence.length === 0) {
-    issues.push("taskSequence must include at least one step");
-  }
+function hasFiniteNumber(value) {
+  return Number.isFinite(Number(value));
+}
 
-  const validTargets = new Set([
-    ...waypointKeys,
-    ...(room.objects || []).map((item) => item.id),
-    ...(room.zones || []).map((item) => item.id),
-  ]);
+function validatePoseShape(pathName, pose = {}, errors) {
+  ["x", "y", "z", "yaw"].forEach((key) => {
+    if (!hasFiniteNumber(pose?.[key] ?? 0)) {
+      errors.push(makeValidationIssue(
+        "error",
+        "INVALID_POSE",
+        `${pathName}.${key}`,
+        "must be numeric"
+      ));
+    }
+  });
+}
 
-  (room.taskSequence || []).forEach((step, index) => {
-    if (!step.action) issues.push(`taskSequence[${index}].action is required`);
-    if (!step.target) issues.push(`taskSequence[${index}].target is required`);
+function validateDuplicateIds(kind, items = [], errors) {
+  const seen = new Map();
+  const validIds = new Set();
 
-    if (step.target && !validTargets.has(step.target)) {
-      issues.push(`taskSequence[${index}].target '${step.target}' does not exist in waypoints, objects, or zones`);
+  (Array.isArray(items) ? items : []).forEach((item, index) => {
+    const id = String(item?.id || "").trim();
+    const pathName = `${kind}[${index}].id`;
+
+    if (!id) {
+      errors.push(makeValidationIssue("error", "MISSING_ID", pathName, `${kind} id is required`));
+      return;
+    }
+
+    if (seen.has(id)) {
+      errors.push(makeValidationIssue(
+        "error",
+        "DUPLICATE_ID",
+        pathName,
+        `duplicate ${kind} id '${id}' also appears at ${kind}[${seen.get(id)}]`,
+        { id, firstIndex: seen.get(id), duplicateIndex: index }
+      ));
+    } else {
+      seen.set(id, index);
+      validIds.add(id);
     }
   });
 
-  return { ready: issues.length === 0, issues };
+  return validIds;
+}
+
+function validateRobotPlan(room, options = {}) {
+  const mode = options.mode || "draft";
+  const errors = [];
+  const warnings = [];
+
+  if (!room || typeof room !== "object") {
+    errors.push(makeValidationIssue("error", "ROOM_REQUIRED", "room", "room payload is required"));
+    return {
+      ready: false,
+      canSave: false,
+      mode,
+      severity: "error",
+      errors,
+      warnings,
+      issues: errors.map(issueText),
+      blockingIssues: errors.map(issueText),
+    };
+  }
+
+  if (!String(room.roomId || "").trim()) {
+    errors.push(makeValidationIssue("error", "ROOM_ID_REQUIRED", "roomId", "Room ID is required"));
+  }
+
+  if (!String(room.roomName || "").trim()) {
+    warnings.push(makeValidationIssue("warning", "ROOM_NAME_MISSING", "roomName", "Room name is recommended for Foxglove/demo labels"));
+  }
+
+  const dimensionIssues = validateDimensions(room.dimensions || {});
+  dimensionIssues.forEach((message) => {
+    errors.push(makeValidationIssue("error", "INVALID_DIMENSION", "dimensions", message));
+  });
+
+  const objects = Array.isArray(room.objects) ? room.objects : [];
+  const zones = Array.isArray(room.zones) ? room.zones : [];
+  const waypoints = room.waypoints && typeof room.waypoints === "object" ? room.waypoints : {};
+  const taskSequence = Array.isArray(room.taskSequence) ? room.taskSequence : [];
+
+  const objectIds = validateDuplicateIds("objects", objects, errors);
+  const zoneIds = validateDuplicateIds("zones", zones, errors);
+  const waypointKeys = new Set(Object.keys(waypoints));
+
+  if (!objects.length) {
+    warnings.push(makeValidationIssue("warning", "OBJECTS_EMPTY", "objects", "add at least one robot-visible object before export"));
+  }
+
+  if (!zones.length) {
+    warnings.push(makeValidationIssue("warning", "ZONES_EMPTY", "zones", "add at least one cleaning, no-go, reset, or maintenance zone before export"));
+  }
+
+  objects.forEach((item, index) => {
+    if (!String(item?.label || "").trim()) {
+      warnings.push(makeValidationIssue("warning", "OBJECT_LABEL_MISSING", `objects[${index}].label`, `object '${item?.id || index}' should have a readable label`));
+    }
+    if (!String(item?.type || "").trim()) {
+      errors.push(makeValidationIssue("error", "OBJECT_TYPE_REQUIRED", `objects[${index}].type`, `object '${item?.id || index}' type is required`));
+    }
+    validatePoseShape(`objects[${index}].pose`, item?.pose || {}, errors);
+  });
+
+  zones.forEach((zone, index) => {
+    if (!String(zone?.type || "").trim()) {
+      errors.push(makeValidationIssue("error", "ZONE_TYPE_REQUIRED", `zones[${index}].type`, `zone '${zone?.id || index}' type is required`));
+    }
+
+    const bounds = Array.isArray(zone?.bounds) ? zone.bounds : [];
+    if (bounds.length < 2) {
+      errors.push(makeValidationIssue("error", "ZONE_BOUNDS_REQUIRED", `zones[${index}].bounds`, `zone '${zone?.id || index}' needs at least two bound points`));
+    }
+
+    bounds.forEach((point, pointIndex) => {
+      if (!hasFiniteNumber(point?.x) || !hasFiniteNumber(point?.y)) {
+        errors.push(makeValidationIssue(
+          "error",
+          "ZONE_BOUND_INVALID",
+          `zones[${index}].bounds[${pointIndex}]`,
+          `zone '${zone?.id || index}' bound point needs numeric x/y`
+        ));
+      }
+    });
+  });
+
+  if (!waypointKeys.has("home")) {
+    errors.push(makeValidationIssue("error", "HOME_WAYPOINT_REQUIRED", "waypoints.home", "home waypoint is required for robot start/dock"));
+  }
+
+  if (waypointKeys.size < 2) {
+    warnings.push(makeValidationIssue("warning", "TARGET_WAYPOINT_MISSING", "waypoints", "add at least one target waypoint besides home before export"));
+  }
+
+  Object.entries(waypoints).forEach(([key, pose]) => {
+    if (!String(key || "").trim()) {
+      errors.push(makeValidationIssue("error", "WAYPOINT_KEY_REQUIRED", "waypoints", "waypoint key is required"));
+    }
+    validatePoseShape(`waypoints.${key}`, pose || {}, errors);
+  });
+
+  if (!taskSequence.length) {
+    warnings.push(makeValidationIssue("warning", "TASK_SEQUENCE_EMPTY", "taskSequence", "add at least one task step before export"));
+  }
+
+  const validTargets = new Set([...waypointKeys, ...objectIds, ...zoneIds]);
+
+  taskSequence.forEach((step, index) => {
+    const action = String(step?.action || "").trim();
+    const target = String(step?.target || "").trim();
+
+    if (!action) {
+      errors.push(makeValidationIssue("error", "TASK_ACTION_REQUIRED", `taskSequence[${index}].action`, "task action is required"));
+    }
+
+    if (!target) {
+      errors.push(makeValidationIssue("error", "TASK_TARGET_REQUIRED", `taskSequence[${index}].target`, "task target is required"));
+      return;
+    }
+
+    if (!validTargets.has(target)) {
+      errors.push(makeValidationIssue(
+        "error",
+        "TASK_TARGET_MISSING",
+        `taskSequence[${index}].target`,
+        `target '${target}' does not exist in waypoints, objects, or zones`,
+        { target, validTargets: Array.from(validTargets).sort() }
+      ));
+    }
+  });
+
+  const ready = errors.length === 0 && warnings.length === 0;
+  const canSave = errors.length === 0;
+
+  return {
+    ready,
+    canSave,
+    mode,
+    severity: errors.length ? "error" : warnings.length ? "warning" : "ready",
+    errors,
+    warnings,
+    issues: [...errors, ...warnings].map(issueText),
+    blockingIssues: errors.map(issueText),
+  };
+}
+
+function assertRobotPlanCanSave(room, message = "Robot room has validation errors") {
+  const validation = validateRobotPlan(room, { mode: "save" });
+  if (!validation.canSave) {
+    throw makeHttpError(422, message, validation.blockingIssues);
+  }
+  return validation;
+}
+
+function assertRobotPlanReadyForExport(room) {
+  const validation = validateRobotPlan(room, { mode: "export" });
+  if (!validation.ready) {
+    throw makeHttpError(422, "Robot plan is not ready to export", validation.issues);
+  }
+  return validation;
 }
 
 function roomFolderPath(roomId) {
@@ -478,7 +701,11 @@ function roomSummary(room) {
       inspectionTasks: (room.maintenanceInspectionTasks || []).length,
     },
     readyForExport: validation.ready,
+    canSave: validation.canSave,
+    validationSeverity: validation.severity,
     validationIssues: validation.issues,
+    validationErrors: validation.errors,
+    validationWarnings: validation.warnings,
     updatedAt: room.updatedAt,
   };
 }
@@ -557,6 +784,7 @@ router.post("/rooms", (req, res) => {
     const roomId = sanitizeRoomId(req.body?.roomId || req.body?.id);
     const existing = store.rooms.find((item) => item.roomId === roomId) || null;
     const room = normalizeRoom({ ...req.body, roomId }, existing);
+    assertRobotPlanCanSave(room, "Robot room has validation errors. Fix the red items before saving this plan.");
     const dimensionIssues = validateDimensions(room.dimensions);
 
     if (dimensionIssues.length) {
@@ -588,6 +816,7 @@ router.put("/rooms/:roomId", (req, res) => {
   try {
     const { room: existing } = getRoomOrThrow(req.params.roomId);
     const room = normalizeRoom({ ...req.body, roomId: existing.roomId }, existing);
+    assertRobotPlanCanSave(room, "Robot room has validation errors. Fix the red items before saving this plan.");
     const dimensionIssues = validateDimensions(room.dimensions);
 
     if (dimensionIssues.length) {
@@ -613,7 +842,9 @@ router.post("/rooms/:roomId/objects", (req, res) => {
       ? req.body.objects.map(normalizeRobotObject)
       : upsertById(room.objects, normalizeRobotObject(req.body));
 
-    const savedRoom = persistRoom({ ...room, objects: nextObjects });
+    const nextRoom = { ...room, objects: nextObjects };
+    assertRobotPlanCanSave(nextRoom, "Object save blocked because the robot plan has validation errors.");
+    const savedRoom = persistRoom(nextRoom);
 
     res.json({
       ok: true,
@@ -632,7 +863,9 @@ router.post("/rooms/:roomId/zones", (req, res) => {
       ? req.body.zones.map(normalizeZone)
       : upsertById(room.zones, normalizeZone(req.body));
 
-    const savedRoom = persistRoom({ ...room, zones: nextZones });
+    const nextRoom = { ...room, zones: nextZones };
+    assertRobotPlanCanSave(nextRoom, "Zone save blocked because the robot plan has validation errors.");
+    const savedRoom = persistRoom(nextRoom);
 
     res.json({
       ok: true,
@@ -658,7 +891,9 @@ router.post("/rooms/:roomId/waypoints", (req, res) => {
       nextWaypoints[waypoint.key] = waypoint.pose;
     }
 
-    const savedRoom = persistRoom({ ...room, waypoints: nextWaypoints });
+    const nextRoom = { ...room, waypoints: nextWaypoints };
+    assertRobotPlanCanSave(nextRoom, "Waypoint save blocked because the robot plan has validation errors.");
+    const savedRoom = persistRoom(nextRoom);
 
     res.json({
       ok: true,
@@ -684,12 +919,32 @@ router.post("/rooms/:roomId/tasks", (req, res) => {
       ? [...(room.taskSequence || []), ...normalizedSteps].map(normalizeTaskStep)
       : normalizedSteps.map(normalizeTaskStep);
 
-    const savedRoom = persistRoom({ ...room, taskSequence: nextTaskSequence });
+    const nextRoom = { ...room, taskSequence: nextTaskSequence };
+    assertRobotPlanCanSave(nextRoom, "Task save blocked: one or more task targets are missing from waypoints, objects, or zones.");
+    const savedRoom = persistRoom(nextRoom);
 
     res.json({
       ok: true,
       taskSequence: savedRoom.taskSequence,
       summary: roomSummary(savedRoom),
+    });
+  } catch (error) {
+    sendError(res, error);
+  }
+});
+
+router.get("/rooms/:roomId/validate", (req, res) => {
+  try {
+    const { room } = getRoomOrThrow(req.params.roomId);
+    const validation = validateRobotPlan(room, { mode: "export" });
+
+    res.json({
+      ok: true,
+      roomId: room.roomId,
+      readyForExport: validation.ready,
+      canSave: validation.canSave,
+      validation,
+      summary: roomSummary(room),
     });
   } catch (error) {
     sendError(res, error);
@@ -704,6 +959,7 @@ router.get("/rooms/:roomId/export-plan", (req, res) => {
     if (!validation.ready) {
       throw makeHttpError(422, "Robot plan is not ready to export", validation.issues);
     }
+    assertRobotPlanReadyForExport(room);
 
     const plan = buildRobotTaskPlan(room);
     syncRoomJsonFiles(room);
