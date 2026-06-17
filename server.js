@@ -200,6 +200,7 @@ const corsCfg = {
     'Idempotency-Key',
     'idempotency-key',
     'x-tenant-id',
+    'x-developer-progress-token',
   ],
 
   exposedHeaders: [
@@ -335,6 +336,7 @@ app.use('/api/pricing', require('./routes/pricing.routes'));
 app.use("/api/invite", firebaseAuth, requireOpsAdmin, inviteRoutes);
 app.use("/api/tx", auth, require("./routes/tx.screenshot"));
 app.use("/api/uploads", auth, require("./routes/cloudinary.upload"));
+app.use("/api/developer-progress", require("./routes/developerProgress.routes"));
 app.use("/api/finance", auth, require("./routes/finance.transactions"));
 app.use("/api/pc/str", require("./routes/psStr")); // frontend fallbacks
 app.use('/api/pc', require('./routes/pc'));
